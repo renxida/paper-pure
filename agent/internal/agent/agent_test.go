@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -734,4 +735,44 @@ func TestXochitlCheckModes(t *testing.T) {
 	if err := h.agent().checkXochitl(context.Background(), &release.Manifest{}); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestHeadersAndCAFile(t *testing.T) {
+	var gotID string
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotID = r.Header.Get("CF-Access-Client-Id")
+		w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	c := Defaults()
+	c.Root = filepath.Join(dir, "root")
+	c.OSRelease = filepath.Join(dir, "none")
+	c.Headers = map[string]string{"CF-Access-Client-Id": "tablet.access"}
+
+	// System roots do not trust the test server.
+	a, err := New(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.getSmall(context.Background(), srv.URL); err == nil {
+		t.Fatal("untrusted TLS server accepted")
+	}
+	// Pinning its CA with ca_file does.
+	ca := filepath.Join(dir, "ca.pem")
+	write(t, ca, string(pemCert(srv.Certificate().Raw)))
+	c.CAFile = ca
+	a, err = New(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := a.getSmall(context.Background(), srv.URL)
+	if err != nil || string(b) != "ok" {
+		t.Fatalf("pinned CA: %q %v", b, err)
+	}
+	eq(t, "header sent", gotID, "tablet.access")
+}
+
+func pemCert(der []byte) []byte {
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 }
