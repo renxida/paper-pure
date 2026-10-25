@@ -23,7 +23,7 @@ trap cleanup EXIT
 dx() { docker exec "$NAME" "$@"; }
 
 docker image inspect "$IMAGE" >/dev/null 2>&1 || { echo "SKIP: no $IMAGE (agent/test/import-rootfs.sh builds it)"; exit 0; }
-rm -rf "$W"; mkdir -p "$W/home/paper-pure/bin" "$W/certs"
+rm -rf "$W"; mkdir -p "$W/home/paper-pure/bin" "$W/home/inst" "$W/certs"
 (cd "$HERE/.." && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o "$W/home/paper-pure/bin/pp-proxy" ./tablet-proxy)
 (cd "$HERE/.." && PP_CERT_OUT="$W/certs" go test -count=1 -run TestOpenSSLAgrees ./tablet-proxy >/dev/null)
 cat > "$W/home/paper-pure/agent.json" <<EOF
@@ -49,14 +49,28 @@ if out=$(dx openssl verify -CAfile /certs/ca.pem -verify_hostname pp.example.org
 fi
 case "$out" in *subtree*) ok "tablet OpenSSL enforces the name constraints ($(echo "$out" | grep -o 'permitted subtree violation' | head -n 1))" ;; *) die "$out" ;; esac
 
-dx "$P" gencert >/dev/null
+# install.sh --runtime on the tablet userland, twice (idempotent), with a
+# fake systemctl (no systemd in a container) and a fake notes dir.
+cp "$HERE/install.sh" "$HERE/pp-proxy.service" "$W/home/paper-pure/bin/pp-proxy" "$W/home/inst/"
+mkdir -p "$W/home/.local/share/remarkable/xochitl"
+printf '{\n    "synced": true,\n    "visibleName": "proof"\n}\n' > "$W/home/.local/share/remarkable/xochitl/proof.metadata"
+dx sh -c 'mkdir -p /fake && printf "#!/bin/sh\necho \"\$*\" >> /tmp/systemctl.log\n" > /fake/systemctl && chmod +x /fake/systemctl'
+for _ in 1 2; do
+    # shellcheck disable=SC2016 # $PATH expands inside the container
+    out=$(dx sh -c 'cd /home/root/inst && PATH=/fake:$PATH bash install.sh --runtime 2>&1') || die "install.sh --runtime: $out"
+done
+has() { case "$2" in *"$3"*) ok "$1 has: $3" ;; *) die "$1: missing '$3' in: $2" ;; esac; }
+has "install.sh --runtime (2nd run)" "$out" "installed (--runtime)"
+has "pp-proxy check through the gate" "$out" "200 OK"
 eq "files gencert wrote (no CA key)" "$(dx sh -c 'ls /home/root/paper-pure/proxy | tr "\n" " "')" "ca.crt cert.pem key.pem "
-# What the device lane does on the real tablet (there, into the real rootfs
-# under the /etc overlay): trust ca.crt with the tablet's own tool.
+eq "CA in the system bundle (after 2 runs)" "$(dx grep -c "$(sed -n 2p "$W/home/paper-pure/proxy/ca.crt")" /etc/ssl/certs/ca-certificates.crt)" 1
+eq "cloud names in /etc/hosts (after 2 runs)" "$(dx grep -c '^127.0.0.1 .*\(remarkable\|appspot\)' /etc/hosts)" 13
+eq "unit" "$(dx ls /run/systemd/system/pp-proxy.service)" /run/systemd/system/pp-proxy.service
+eq "systemctl calls" "$(dx sort -u /tmp/systemctl.log | tr '\n' ',')" "daemon-reload,reset-failed xochitl.service,restart pp-proxy.service,start xochitl.service,stop xochitl.service,"
+eq "notes marked not synced" "$(grep -c '"synced": false' "$W/home/.local/share/remarkable/xochitl/proof.metadata")" 1
+# The persistent install trusts the CA with the tablet's own tool instead.
 out=$(dx sh -c 'mkdir -p /usr/local/share/ca-certificates && cp /home/root/paper-pure/proxy/ca.crt /usr/local/share/ca-certificates/pp-proxy.crt && update-ca-certificates 2>&1')
-case "$out" in *"1 added"*) ok "update-ca-certificates: 1 added" ;; *) die "update-ca-certificates: $out" ;; esac
-dx sh -c "$P hosts >> /etc/hosts"
-eq "cloud names in /etc/hosts" "$(dx grep -c '^127.0.0.1 .*\(remarkable\|appspot\)' /etc/hosts)" 13
+case "$out" in *"1 added"*) ok "update-ca-certificates (persist path): 1 added" ;; *) die "update-ca-certificates: $out" ;; esac
 
 dx sh -c "$P -listen 127.0.0.1:$PORT run > /tmp/proxy.log 2>&1 &"
 for _ in $(seq 60); do dx sh -c "echo | openssl s_client -connect 127.0.0.1:$PORT >/dev/null 2>&1" && break; sleep 0.5; done

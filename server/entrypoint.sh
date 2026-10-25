@@ -24,23 +24,29 @@ if [ -f "$D/.restore/READY" ]; then
     rm -rf "$D/.restore"
 fi
 
+date -d "today ${BACKUP_AT:=03:17}" >/dev/null 2>&1 || { echo "entrypoint: bad BACKUP_AT '$BACKUP_AT' (want HH:MM)" >&2; exit 1; }
+
 mkdir -p "$DATADIR" "$D/pp"
 chown -R pp:pp "$D"   # files a root shell or a restore left behind
 case "${RESTIC_REPOSITORY:-}" in   # a local repo (the restore drill) must be ours too
     /*) mkdir -p "$RESTIC_REPOSITORY" && chown pp:pp "$RESTIC_REPOSITORY" ;;
 esac
-as_pp() { setpriv --reuid=pp --regid=pp --init-groups --inh-caps=-all "$@"; }
+AS_PP=(setpriv --reuid=pp --regid=pp --init-groups --inh-caps=-all)   # drop root; each daemon is its own job
 
-if ! as_pp rmfakecloud listusers 2>/dev/null | grep -q .; then
+if ! "${AS_PP[@]}" rmfakecloud listusers 2>/dev/null | grep -q .; then
     # rmfakecloud makes the first web login an admin, and a user created with
     # the CLI while it runs isn't seen until restart (first login then fails).
     echo "entrypoint: NO USERS. Run: rmfakecloud-cli setuser -u EMAIL -a -s   then restart the container"
 fi
-as_pp rmfakecloud &
-as_pp ppd -addr :3080 -data "$D/pp" -upstream http://127.0.0.1:3000 &
+PIDS=()
+"${AS_PP[@]}" rmfakecloud &
+PIDS+=($!)
+"${AS_PP[@]}" ppd -addr :3080 -data "$D/pp" -upstream http://127.0.0.1:3000 &
+PIDS+=($!)
 
 if [ -n "${TUNNEL_TOKEN:-}" ]; then
-    as_pp cloudflared tunnel --no-autoupdate run &   # reads TUNNEL_TOKEN
+    "${AS_PP[@]}" cloudflared tunnel --no-autoupdate run &   # reads TUNNEL_TOKEN
+    PIDS+=($!)
 else
     echo "entrypoint: TUNNEL_TOKEN not set, no tunnel (local mode)"
 fi
@@ -52,18 +58,19 @@ backup_loop() {
         [ "$next" -gt "$now" ] || next=$(date -d "tomorrow $BACKUP_AT" +%s)
         echo "backup: next run $(date -d "@$next" '+%F %T %Z')"
         sleep $((next - now))
-        as_pp backup.sh || echo "backup: FAILED (see above); retrying tomorrow"
+        backup.sh || echo "backup: FAILED (see above); retrying tomorrow"
     done
 }
 if [ -n "${RESTIC_REPOSITORY:-}" ]; then
     backup_loop &
+    PIDS+=($!)
 else
     echo "entrypoint: RESTIC_REPOSITORY not set, no backups"
 fi
 
-stop() { jobs -p | xargs -r kill -TERM 2>/dev/null || true; wait; }
+stop() { kill -TERM "${PIDS[@]}" 2>/dev/null || true; wait; }
 trap 'stop; exit 0' TERM INT
-wait -n
+wait -n || true
 echo "entrypoint: a daemon exited; stopping the container" >&2
 stop
 exit 1

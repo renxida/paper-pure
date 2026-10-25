@@ -41,6 +41,7 @@ PP_TEST_RESTIC=$(openssl rand -hex 24)
 CF_ID="proof-tablet.access"
 CF_SECRET=$(openssl rand -hex 32)
 PW=$(openssl rand -hex 12)
+export PP_TEST_BACKUP_AT=03:17
 compose() { docker compose -p "$P" -f "$S/compose.yaml" -f "$S/compose.local.yaml" "$@"; }
 app() { compose exec -T app "$@"; }
 PIDS=()
@@ -76,6 +77,8 @@ ok "tools built"
 # ---- 1. up ----------------------------------------------------------------
 step "1. start the stack (no tunnel), check the prod shape has no ports"
 eq "published ports in compose.yaml alone" "$(docker compose -f "$S/compose.yaml" config --format json | jget services app | grep -c '"published"' || true)" 0
+# The nightly backup, scheduled two minutes out so step 7 sees the loop fire.
+PP_TEST_BACKUP_AT=$(date -u -d '+2 min' +%H:%M)
 compose up -d --no-build --quiet-pull 2>&1 | tail -n 2
 wait_healthy
 eq "host ports" "$(docker port "$(compose ps -q app)" | tr '\n' ' ')" "3080/tcp -> 127.0.0.1:3080 "
@@ -195,8 +198,13 @@ if [ -z "${PP_SKIP_TATSU:-}" ]; then
 fi
 
 # ---- 7. backup drill ----------------------------------------------------------
-step "7. backup drill: backup, wipe, restore, diff, use"
-app backup.sh 2>&1 | tail -n 2 | sed 's/^/    | /'
+step "7. backup drill: the scheduled backup fires, then wipe, restore, diff, use"
+has "entrypoint log" "$(compose logs app)" "backup: next run $(date -u +%F) $PP_TEST_BACKUP_AT:00 UTC"
+for _ in $(seq 200); do curl -fsS "$BASE/pp/backup" 2>/dev/null | grep -q '"ok":true' && break; sleep 1; done
+has "the scheduled run (log)" "$(compose logs app)" "backup: ok"
+app backup.sh 2>&1 | tail -n 1 | sed 's/^/    | /'   # and a manual one, from a root shell
+eq "repo files not owned by pp (root shell runs re-exec as pp)" "$(app find /backup/repo ! -user pp | wc -l | tr -d ' ')" 0
+eq "snapshots" "$(app setpriv --reuid=pp --regid=pp --init-groups env RESTIC_CACHE_DIR=/tmp/restic-cache restic snapshots --json | jget 1 tags 0)" nightly
 B=$(curl -fsS "$BASE/pp/backup")
 eq "last backup ok" "$(jget ok <<<"$B")" true
 SNAP=$(jget summary snapshot_id <<<"$B")

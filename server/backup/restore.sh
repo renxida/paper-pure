@@ -12,6 +12,7 @@
 # manager if the old host is gone. Keep JWT_SECRET_KEY the same too, or the
 # tablet has to pair again (its notes are safe either way).
 set -euo pipefail
+if [ "$(id -u)" = 0 ]; then exec setpriv --reuid=pp --regid=pp --init-groups "$0" "$@"; fi   # as pp, like backup.sh
 
 D="${PP_DATA:-/data}"
 SNAP="${1:-latest}"

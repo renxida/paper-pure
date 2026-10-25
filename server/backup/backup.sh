@@ -7,6 +7,9 @@
 # Needs: RESTIC_REPOSITORY, RESTIC_PASSWORD, and for s3: repos
 # AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY.
 set -euo pipefail
+# Always as pp, like the nightly run, so a root shell can't leave root-owned
+# repo or status files behind.
+if [ "$(id -u)" = 0 ]; then exec setpriv --reuid=pp --regid=pp --init-groups "$0" "$@"; fi
 
 D="${PP_DATA:-/data}"
 : "${RESTIC_REPOSITORY:?RESTIC_REPOSITORY not set}" "${RESTIC_PASSWORD:?RESTIC_PASSWORD not set}"

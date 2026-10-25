@@ -11,6 +11,7 @@ services:
       RM_HTTPS_COOKIE: "false"
       RESTIC_REPOSITORY: /backup/repo
       RESTIC_PASSWORD: ${PP_TEST_RESTIC:?}
+      BACKUP_AT: ${PP_TEST_BACKUP_AT:-03:17}
       TUNNEL_TOKEN: ""
     volumes:
       - backup:/backup

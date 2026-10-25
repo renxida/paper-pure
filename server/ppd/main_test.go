@@ -118,8 +118,11 @@ func TestPublishAndRange(t *testing.T) {
 
 func TestPublishOffWithoutToken(t *testing.T) {
 	_, ts, _ := setup(t, "")
-	if code, _, _ := do(t, "PUT", ts.URL+"/pp/releases/tatsu/x", "x", "Authorization", "Bearer "); code != 403 {
-		t.Fatalf("got %d", code)
+	// An empty token must never match an empty Authorization header.
+	for _, h := range [][]string{nil, {"Authorization", "Bearer "}, {"Authorization", ""}} {
+		if code, _, _ := do(t, "PUT", ts.URL+"/pp/releases/tatsu/x", "x", h...); code != 403 {
+			t.Fatalf("%v: got %d", h, code)
+		}
 	}
 }
 

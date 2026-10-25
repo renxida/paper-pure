@@ -1,0 +1,40 @@
+# Render Blueprint for pp-server (the recommended host; see hosting.md).
+# A background worker has no inbound traffic at all: the only way in is
+# the Cloudflare Tunnel that cloudflared inside the container dials out to.
+# Not deployed yet. Values marked sync: false are typed into Render's
+# dashboard (its secret store) once, and also kept in the password manager.
+services:
+  - type: worker
+    name: pp-server
+    runtime: docker
+    plan: starter                 # 512 MB; the stack idles around 30 MB
+    region: frankfurt             # pick the one nearest Cedar
+    dockerfilePath: ./server/Dockerfile
+    dockerContext: ./server
+    autoDeploy: true              # CI gates merges to main; only server/ changes redeploy
+    buildFilter:
+      paths:
+        - server/**
+    disk:
+      name: data
+      mountPath: /data
+      sizeGB: 5
+    envVars:
+      - key: JWT_SECRET_KEY       # rmfakecloud token signing; changing it logs the tablet out
+        sync: false
+      - key: TUNNEL_TOKEN         # Cloudflare Tunnel connector token
+        sync: false
+      - key: PP_PUBLISH_TOKEN     # CI's token for PUT /pp/releases/...
+        sync: false
+      - key: RESTIC_REPOSITORY    # s3:https://s3.<region>.backblazeb2.com/<bucket>
+        sync: false
+      - key: RESTIC_PASSWORD      # backup encryption; lose it and the backups are noise
+        sync: false
+      - key: AWS_ACCESS_KEY_ID    # B2 application key id (this bucket only)
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+      - key: TZ
+        value: Europe/Berlin      # BACKUP_AT is local to this
+      - key: BACKUP_AT
+        value: "03:17"
