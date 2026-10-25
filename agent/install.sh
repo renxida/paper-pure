@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # Install the paper-pure agent on the tablet. Run ON the tablet, as root,
 # from a directory holding:
 #   pp-agent          (out/pp-agent-arm64)
@@ -7,15 +7,15 @@
 #   systemd/          (pp-agent-boot.service, pp-agent.service, pp-agent.timer,
 #                      pp-agent-tripletap.service)
 #
-#   bash install.sh             copy files into /home/root/paper-pure
-#   bash install.sh --runtime   ...and start the units from /run (gone at
+#   sh install.sh               copy files into /home/root/paper-pure
+#   sh install.sh   --runtime   ...and start the units from /run (gone at
 #                               reboot; a safe first try, no rootfs change)
 #
 # Only cp, chmod and mv: the tablet has no install(1).
 # Making the units survive reboot means writing them under the real /etc
 # (the /etc overlay's upper layer is tmpfs). That step belongs to the
 # device setup; see agent/README.md "What the device lane wires up".
-set -euo pipefail
+set -eu
 
 ROOT=/home/root/paper-pure
 HERE="$(cd "$(dirname "$0")" && pwd)"

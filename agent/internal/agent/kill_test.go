@@ -122,6 +122,31 @@ func TestToggleOffAndOn(t *testing.T) {
 	eq(t, "status live", s.Live, "r1")
 }
 
+func TestToggleOffWhenStartedByHand(t *testing.T) {
+	// Mods on without pp-agent (xovi/start over SSH): no live marker, but
+	// xochitl runs with LD_PRELOAD. A triple-press still means off.
+	h := newHarness(t)
+	h.publish("r1", nil, nil)
+	if err := h.update(); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.toggle(); err != nil { // off
+		t.Fatal(err)
+	}
+	h.hooks()
+	environ := filepath.Join(h.dir, "proc", "100", "environ")
+	write(t, environ, "MALLOC_ARENA_MAX=8\x00LD_PRELOAD=/home/root/xovi/xovi.so\x00")
+	if err := h.toggle(); err != nil {
+		t.Fatal(err)
+	}
+	eq(t, "hand-started mods turned off", h.hooks(), []string{"r1 deactivate tripletap"})
+	write(t, environ, "MALLOC_ARENA_MAX=8\x00") // stock tatsu xochitl
+	if err := h.toggle(); err != nil {
+		t.Fatal(err)
+	}
+	eq(t, "then on again", h.hooks(), []string{"r1 activate tripletap"})
+}
+
 func TestToggleOnUnhealthyEndsStock(t *testing.T) {
 	h := newHarness(t)
 	h.publish("r1", nil, nil)

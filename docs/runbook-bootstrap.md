@@ -79,18 +79,18 @@ make -C agent build
 device/install.sh --agent --release-pub release.pub.pem --agent-json agent.json root@10.11.99.1
 ```
 
-This installs `pp-agent` under `/home/root/paper-pure` and persists its units. One addition from the device side: `pp-agent-boot` waits until `rm-sanity` has cleared the boot ROM's error count (about 60 s after boot) before it turns mods on. A mod that crashes xochitl at boot then can never make the bootloader switch to the other root slot (see `device/README.md`).
+This installs `pp-agent` under `/home/root/paper-pure` and persists its units, including `pp-agent-tripletap`, the triple-press kill switch. One addition from the device side: `pp-agent-boot` and `pp-agent-tripletap` wait until `rm-sanity` has cleared the boot ROM's error count (about 60 s after boot) before anything can turn mods on. A mod that crashes xochitl then can never make the bootloader switch to the other root slot (see `device/README.md`).
 
 Mods (xovi, AppLoad), from `mods/README.md`:
 
 ```bash
 mods/build.sh
-mods/install.sh root@10.11.99.1     # tethered: a reboot is stock until pp-agent activates a release
+mods/install.sh root@10.11.99.1     # by hand, for bring-up; tethered: a reboot is stock
 ```
 
 From then on mods arrive as signed releases through `pp-agent`.
 
-The triple-press kill switch (xovi-tripletap) is not installed yet. Its installer runs `umount -R /etc`, which kills SSH until a reboot. When we add it, its unit goes in with `pp-device.sh persist` instead. It also needs toggle mode to turn mods *off*.
+**human**, once a release is on: press the power button three times, each within 3 s of the last. The tablet sleeps and wakes in between, that's fine. A few seconds later the UI restarts without mods (no AppLoad in the side menu). Three more presses bring them back. Tell Claude if it didn't: `ssh root@10.11.99.1 journalctl -u pp-agent-tripletap` shows what the agent saw. (Never checked on hardware yet: whether the press that wakes the tablet is seen.)
 
 ## 7. Sync to our server (Claude, then human)
 
@@ -115,7 +115,7 @@ Turn flight mode off and join Wi-Fi. SSH stays on USB only.
 - `ssh root@10.11.99.1 /home/root/paper-pure/bin/pp-agent status`: the release it runs, and its last check-in.
 - The server's tablet status page shows `os_version=3.27.2.2`.
 - **human**: write a page in a new notebook. It shows up in the rmfakecloud web UI.
-- **human**: AppLoad is in the side menu.
+- **human**: AppLoad is in the side menu. Triple-press power: it goes away. Triple-press again: it's back.
 - A day later: Settings > General > Software still says 3.27.2.2.
 
 ## Getting back to stock
@@ -124,11 +124,15 @@ From lightest to heaviest:
 
 | What | How | Cable? |
 | --- | --- | --- |
-| Mods off now | `ssh root@10.11.99.1 /home/root/xovi/stock`, or triple-press once tripletap is in | no |
-| Mods off for good | `touch /home/root/paper-pure/disable`, then reboot | no |
+| Mods off now | **Triple-press power.** Mods come back with another triple-press, or with the next release | no |
+| Mods off, stock UI | **Reboot.** The tablet starts stock; mods come back with a triple-press or the next release | no |
+| A bad release | Nothing to do: `pp-agent` rolls back by itself when the health check fails, at install or at the next boot | no |
+| Mods off for good | `ssh root@10.11.99.1 touch /home/root/paper-pure/disable`: nothing turns mods on any more (a triple-press only turns them off). Remove the file to undo | USB for SSH |
 | Our root fs changes undone | `device/install.sh --uninstall root@10.11.99.1`, then reboot. Updates work again, so keep flight mode on if that's not what you want | USB for SSH |
 | Out of developer mode | reMarkable's recovery tool, per support.remarkable.com ("For instructions on how to exit developer mode, visit support.remarkable.com" in Settings). Wipes the tablet again | yes |
 | Tablet won't boot at all | Both slots failing puts it in recovery (fastboot) mode: reMarkable's recovery tool over USB | yes |
+
+Prefer mods back after every reboot? One line in `/home/root/paper-pure/agent.json`: `"activate_on_boot": true`. Then a reboot keeps mods; triple-press and the boot-loop guard (3 unhealthy boots, then stock) still work.
 
 ## Open questions for Cedar
 

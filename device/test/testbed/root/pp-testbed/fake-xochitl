@@ -1,9 +1,20 @@
 #!/bin/sh
 # Stand-in for xochitl in the test bed: stays up and pets the stock unit's
-# 60 s watchdog. If /run/pp-testbed-crash (this boot) or
-# /home/root/pp-testbed-crash-xochitl (every boot) exists, it exits 1 after
-# 2 s instead (boot-loop tests).
+# 60 s watchdog. It exits 1 after 2 s instead (boot-loop tests) if
+# /run/pp-testbed-crash (this boot) or /home/root/pp-testbed-crash-xochitl
+# (every boot) exists.
+# A broken mod: when started with xovi preloaded (the drop-in xovi/start
+# writes) and the live xovi tree has a file "crash", it exits 1: "fast"
+# right away, "slow" after 5 s. Stock (no LD_PRELOAD) it never crashes.
 if [ -e /home/root/pp-testbed-crash-xochitl ] || [ -e /run/pp-testbed-crash ]; then sleep 2; exit 1; fi
+case ${LD_PRELOAD:-} in
+*xovi*)
+    case $(cat /home/root/xovi/crash 2>/dev/null) in
+    fast) echo "fake-xochitl: broken mod, crashing now"; exit 1 ;;
+    slow) echo "fake-xochitl: broken mod, crashing in 5 s"; sleep 5; exit 1 ;;
+    esac
+    echo "fake-xochitl: running with $LD_PRELOAD" ;;
+esac
 while :; do
     systemd-notify WATCHDOG=1
     sleep 20

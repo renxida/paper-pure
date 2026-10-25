@@ -6,7 +6,7 @@
     "CF-Access-Client-Secret": "REPLACE"
   },
   "battery_floor": 30,
-  "stable_seconds": 45,
+  "stable_seconds": 70,
   "boot_guard_max": 3,
-  "activate_on_boot": true
+  "activate_on_boot": false
 }

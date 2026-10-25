@@ -31,8 +31,10 @@ const (
 
 // Toggle is one triple-press (also `pp-agent toggle` over SSH).
 //
-//   - Off when mods are live, when the kill switch file exists, or when
-//     another pp-agent run is busy (it is turning mods on: we stop it).
+//   - Off when mods are live (pp-agent turned them on, or xochitl runs with
+//     LD_PRELOAD, e.g. xovi started by hand), when the kill switch file
+//     exists, or when another pp-agent run is busy (it is turning mods on:
+//     we stop it).
 //   - On otherwise: activate the committed release and health-check it.
 //     A failure deactivates it again, so the end state is stock.
 func (a *Agent) Toggle(ctx context.Context) error {
@@ -52,7 +54,7 @@ func (a *Agent) Toggle(ctx context.Context) error {
 	if err := a.load(); err != nil {
 		return err
 	}
-	off := busy || a.live() != "" || a.disabled()
+	off := busy || a.live() != "" || a.disabled() || a.preloaded(ctx)
 	// A stopped install is rolled back without turning the old release on
 	// again. It is marked failed, so it is not retried by itself.
 	a.recover(ctx, false)
@@ -66,6 +68,12 @@ func (a *Agent) Toggle(ctx context.Context) error {
 
 func (a *Agent) modsOff(ctx context.Context) (string, error) {
 	id := a.live()
+	if id == "" && a.preloaded(ctx) {
+		id = a.st.Current // on, but not by us: any release's deactivate is stock
+		if id == "" {
+			return "tripletap: xochitl has a preload but no release is installed", errors.New("cannot turn mods off: no release installed to run deactivate.sh; run /home/root/xovi/stock")
+		}
+	}
 	if id == "" {
 		a.st.event(a.now(), "tripletap", "", true, "mods already off")
 		return "tripletap: mods already off", nil
@@ -105,6 +113,25 @@ func (a *Agent) modsOn(ctx context.Context) (string, error) {
 	}
 	a.st.event(a.now(), "tripletap", id, true, "mods on")
 	return "tripletap: mods on (" + id + ")", nil
+}
+
+// preloaded: xochitl runs with LD_PRELOAD set. Stock tatsu units set none;
+// xovi's drop-in sets it. So this means mods are on, whoever turned them on.
+func (a *Agent) preloaded(ctx context.Context) bool {
+	x, err := a.probeXochitl(ctx)
+	if err != nil || x.PID <= 0 {
+		return false
+	}
+	b, err := os.ReadFile(filepath.Join(a.cfg.ProcDir, strconv.Itoa(x.PID), "environ"))
+	if err != nil {
+		return false
+	}
+	for _, kv := range strings.Split(string(b), "\x00") {
+		if v, ok := strings.CutPrefix(kv, "LD_PRELOAD="); ok && v != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // TripleTap watches the power key and runs Toggle on three presses, each

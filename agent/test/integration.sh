@@ -10,9 +10,10 @@
 #                                               /etc/os-release (see
 #                                               test/import-rootfs.sh)
 #
-# Scenarios: install->pass, install->fail->rollback, kill -9 mid health
-# check -> rollback at boot, boot-loop guard, OS mismatch, bad signature,
-# status report.
+# Scenarios: install.sh with no install(1), install->pass,
+# install->fail->rollback, kill -9 mid health check -> rollback at boot,
+# boot-loop guard, OS mismatch, bad signature, status report, triple-press
+# toggle (pp-agent tripletap reading KEY_POWER events from a FIFO).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -49,12 +50,14 @@ run()    { set +e; OUTPUT="$(agent "$@" 2>&1)"; RC=$?; set -e; printf '%s\n' "$O
 
 # ---- setup ------------------------------------------------------------------
 step "setup in $W (image $IMAGE)"
-rm -rf "$W"; mkdir -p "$P/bin" "$P/keys" "$W/fake/net/wlan0" "$W/feed" "$W/keys" "$W/evil" "$W/trees"
-cp "$OUT/pp-agent-arm64" "$P/bin/pp-agent"
+rm -rf "$W"; mkdir -p "$P" "$W/fake/net/wlan0" "$W/feed" "$W/keys" "$W/evil" "$W/trees" "$W/stage/systemd"
 cp "$OUT/ppsign-arm64" "$W/fake/ppsign"
 "$PPSIGN" keygen -out "$W/keys" >/dev/null
 "$PPSIGN" keygen -out "$W/evil" >/dev/null
-cp "$W/keys/release.pub.pem" "$P/keys/release.pub.pem"
+# What device/install.sh copies to the tablet; install.sh runs in the container.
+cp "$OUT/pp-agent-arm64" "$W/stage/pp-agent"
+cp "$W/keys/release.pub.pem" "$AGENT/install.sh" "$W/stage/"
+cp "$AGENT"/systemd/* "$W/stage/systemd/"
 
 echo up > "$W/fake/net/wlan0/operstate"
 printf 'Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\nwlan0\t00000000\t0101A8C0\t0003\t0\t0\t600\t00000000\t0\t0\t0\n' > "$W/fake/route"
@@ -68,6 +71,7 @@ printf 'IMG_VERSION="%s"\n' "$OS" > "$W/fake/os-release"
 # new PID and one more restart, like Restart=on-failure in a crash loop.
 cat > "$W/fake/systemctl" <<'EOF'
 #!/bin/sh
+if [ "$1" = reset-failed ]; then echo "$*" >> /fake/systemctl.log; exit 0; fi
 n=$(cat /fake/restarts 2>/dev/null || echo 0)
 if [ "$(cat /fake/xochitl)" = crash ]; then n=$((n + 1)); echo "$n" > /fake/restarts; fi
 echo "ActiveState=active"
@@ -97,7 +101,10 @@ cat > "$P/agent.json" <<EOF
   "stable_seconds": 3,
   "poll_millis": 500,
   "hook_timeout_seconds": 60,
-  "check_timeout_seconds": 600
+  "check_timeout_seconds": 600,
+  "activate_on_boot": true,
+  "run_dir": "/fake/run",
+  "power_key_device": "/fake/pwrkey"
 }
 EOF
 
@@ -127,13 +134,22 @@ publish() { # id tree [key] [os]
 }
 
 docker run -d --name "$NAME" --platform linux/arm64 \
-    -v "$W/home:/home/root" -v "$W/fake:/fake" -v "$W/feed:/feed" \
+    -v "$W/home:/home/root" -v "$W/fake:/fake" -v "$W/feed:/feed" -v "$W/stage:/stage:ro" \
     "$IMAGE" sleep 100000 >/dev/null
 docker exec -d "$NAME" /fake/ppsign serve -dir /feed -addr "127.0.0.1:$PORT"
 for _ in $(seq 60); do dx wget -q -O /dev/null "http://127.0.0.1:$PORT/" 2>/dev/null && break; sleep 0.5; done
 eq "arch" "$(dx uname -m)" aarch64
+
+step "0. install.sh on the target userland"
+if dx sh -c 'command -v install' >/dev/null 2>&1; then echo "  (this image has install(1); the tatsu image does not)"; else ok "no install(1) here, like the tablet"; fi
+set +e; OUTPUT="$(dx sh /stage/install.sh 2>&1)"; RC=$?; set -e
+printf '%s\n' "$OUTPUT" | sed 's/^/    | /'
+eq "install.sh exit" "$RC" 0
 V="$(agent version)"
 if [ -n "$V" ]; then ok "pp-agent version $V runs"; else die "pp-agent did not run"; fi
+has "agent.json kept" "$(cat "$P/agent.json")" "127.0.0.1:$PORT"
+eq "units installed" "$(find "$P/systemd" -type f -printf '%f\n' | sort | tr '\n' ' ')" "pp-agent-boot.service pp-agent-tripletap.service pp-agent.service pp-agent.timer "
+eq "key installed" "$(cmp "$P/keys/release.pub.pem" "$W/keys/release.pub.pem" && echo same)" same
 
 # ---- 1. install -> pass ----------------------------------------------------------
 step "1. install good1 -> healthy"
@@ -230,6 +246,44 @@ if [ ! -e "$P/releases/evil6" ]; then ok "evil6 not unpacked"; else die "evil6 u
 step "7. status"
 eq "status release" "$(agent status | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["release"])')" good4
 eq "releases kept" "$(find "$P/releases" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort | tr '\n' ' ')" "good1 good4 "
+
+# ---- 8. triple-press ------------------------------------------------------------
+step "8. pp-agent tripletap: three KEY_POWER presses toggle mods off, then on"
+# A FIFO stands in for /dev/input/eventN; we write struct input_event records.
+mkfifo "$W/fake/pwrkey"
+docker exec -d "$NAME" sh -c '/home/root/paper-pure/bin/pp-agent tripletap > /fake/tripletap.log 2>&1'
+for _ in $(seq 60); do grep -q 'tripletap: watching' "$W/fake/tripletap.log" 2>/dev/null && break; sleep 0.5; done
+has "daemon" "$(cat "$W/fake/tripletap.log")" "watching /fake/pwrkey for 3 presses"
+press() { # N presses, GAP seconds apart, as the kernel reports them (press, SYN, release, SYN)
+    python3 -I -c '
+import struct, sys, time
+n, gap = int(sys.argv[1]), float(sys.argv[2])
+with open(sys.argv[3], "wb", buffering=0) as f:
+    for i in range(n):
+        t = time.time(); s, us = int(t), int((t % 1) * 1e6)
+        for typ, code, val in ((1, 116, 1), (0, 0, 0), (1, 116, 0), (0, 0, 0)):
+            f.write(struct.pack("<qqHHi", s, us, typ, code, val))
+        time.sleep(gap)
+' "$1" "$2" "$W/fake/pwrkey"
+}
+waitlog() { for _ in $(seq 120); do grep -q "$1" "$W/fake/hooks.log" 2>/dev/null && return 0; sleep 0.5; done; return 1; }
+eq "live before" "$(cat "$W/fake/run/live")" good4
+hooks >/dev/null
+press 3 0.4
+waitlog "good4 deactivate tripletap" || die "no deactivate after a triple-press"
+sleep 2
+eq "off: hooks" "$(hooks)" "good4 deactivate tripletap"
+if [ ! -e "$W/fake/run/live" ]; then ok "live marker gone"; else die "live marker still there"; fi
+press 2 0.4
+sleep 3
+eq "two presses do nothing" "$(hooks)" ""
+press 3 0.4
+waitlog "good4 activate tripletap" || die "no activate after a triple-press"
+for _ in $(seq 60); do [ -e "$W/fake/run/live" ] && grep -q 'tripletap: mods on' "$P/state/agent.log" && break; sleep 0.5; done
+eq "on: hooks" "$(hooks)" "good4 activate tripletap"
+eq "live after" "$(cat "$W/fake/run/live")" good4
+has "agent log" "$(cat "$P/state/agent.log")" "tripletap: mods on (good4)"
+has "reset-failed before hooks" "$(cat "$W/fake/systemctl.log")" "reset-failed xochitl.service"
 
 printf '\nPASS: %d checks (image %s)\n' "$PASS" "$IMAGE"
 [ -n "${PP_WORK:-}" ] || rm -rf "$W"

@@ -11,8 +11,15 @@
 #                                      (never in the repo), used once for `docker import`
 #   PP_SLOW=1 device/test/run.sh ...   also the boot-loop scenarios (about 15 min)
 #   PP_KEEP=1                          leave the container running at the end
+#   PP_NAME=..., PP_PORT=...           container name (default pp-device-it), SSH port (3094)
 #
-# Needs docker with arm64 emulation (binfmt), ssh, ssh-keygen, go (for pp-proxy).
+# Scenario 9 runs the real pp-agent with the mods lane's real hooks and
+# upstream's xovi/start and xovi/stock: triple-press toggle (KEY_POWER events
+# written into a FIFO the agent reads as its power key), reboot = stock, and
+# crash loops at install and at boot.
+#
+# Needs docker with arm64 emulation (binfmt), ssh, ssh-keygen, go (for
+# pp-proxy and the agent), git, python3.
 # Commands for the test bed are single-quoted on purpose: they expand there.
 # shellcheck disable=SC2016
 set -euo pipefail
@@ -21,7 +28,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
 ROOTFS=${1:-}
 TAG=3.27.2.2
-C=pp-device-it
+C=${PP_NAME:-pp-device-it}
 PORT=${PP_PORT:-3094}
 WORK=${PP_WORK:-$(mktemp -d)}
 mkdir -p "$WORK"
@@ -31,6 +38,8 @@ ok()   { PASS=$((PASS + 1)); echo "  ok   $*"; }
 bad()  { FAILN=$((FAILN + 1)); echo "  FAIL $*"; }
 check() { local what=$1; shift; if "$@"; then ok "$what"; else bad "$what"; fi; }
 t() { printf '\n== %s\n' "$*"; }
+# shellcheck disable=SC2317  # called through check()
+logto() { local f=$1; shift; "$@" > "$f" 2>&1; }   # check "..." logto FILE CMD: CMD's output to FILE, the verdict on screen
 
 # ------------------------------------------------------------- images
 if ! docker image inspect "pp-device-rootfs:$TAG" > /dev/null 2>&1; then
@@ -40,6 +49,7 @@ if ! docker image inspect "pp-device-rootfs:$TAG" > /dev/null 2>&1; then
     sudo tar --numeric-owner -C "$ROOTFS" -c . | docker import --platform linux/arm64 - "pp-device-rootfs:$TAG"
 fi
 docker build -q --platform linux/arm64 -t "pp-device-testbed:$TAG" "$HERE/testbed" > /dev/null
+make -s -C "$REPO/agent" build > /dev/null   # the agent under test, fresh
 
 # ------------------------------------------------------------- keys, bins
 [ -f "$WORK/id" ] || ssh-keygen -q -t ed25519 -N '' -C pp-device-test -f "$WORK/id"
@@ -126,7 +136,7 @@ check "second install changes nothing" [ "$(grep -c '^CHANGE' "$WORK/3-install-a
 
 t "4. reboot: the freeze comes from the root fs, not the tmpfs overlay"
 reboot
-check "verify passes after reboot" inst --verify > "$WORK/4-verify-after-reboot.log" 2>&1
+check "verify passes after reboot" logto "$WORK/4-verify-after-reboot.log" inst --verify
 check "the /etc overlay's tmpfs upper holds none of our files" dev '! find /var/volatile/etc -name "*.service" -o -name hosts -o -name "*.socket" | grep -q .'
 for u in swupdate.service update-engine.service memfaultd.service; do
     check "$u never started this boot" dev "[ \"\$(systemctl show -P InactiveExitTimestampMonotonic $u)\" = 0 ]"
@@ -160,14 +170,16 @@ KEYS="$WORK/agentkeys"
 cat > "$WORK/agent.json" << 'EOF'
 {"feed_url": "http://127.0.0.1:3098/releases/tatsu/", "status_url": "http://127.0.0.1:3098/pp/status/tatsu",
  "headers": {"CF-Access-Client-Id": "test.access", "CF-Access-Client-Secret": "test"},
- "battery_floor": 30, "stable_seconds": 45, "boot_guard_max": 3, "activate_on_boot": true}
+ "battery_floor": 30, "boot_guard_max": 3, "power_key_device": "/home/root/pp-test/pwrkey"}
 EOF
+# The test bed has no power key: a FIFO stands in (scenario 9 writes events).
+dev 'mkdir -p /home/root/pp-test && { [ -p /home/root/pp-test/pwrkey ] || mkfifo /home/root/pp-test/pwrkey; }'
 [ -f "$WORK/pp-proxy-arm64" ] || (cd "$REPO/server" && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -o "$WORK/pp-proxy-arm64" ./tablet-proxy)
 PP_PROXY_BIN="$WORK/pp-proxy-arm64" inst --agent --release-pub "$KEYS/release.pub.pem" --agent-json "$WORK/agent.json" --proxy > "$WORK/6-agent-proxy.log" 2>&1 && rc=0 || rc=$?
 check "install with --agent --proxy exits 0" [ "$rc" = 0 ]
 check "/ went back to read-only (no EBUSY)" bash -c "! grep -q 'stays read-write' '$WORK/6-agent-proxy.log'"
 reboot
-check "verify passes after reboot (agent and proxy included)" inst --verify > "$WORK/6-verify.log" 2>&1
+check "verify passes after reboot (agent and proxy included)" logto "$WORK/6-verify.log" inst --verify
 check "pp-proxy.service runs from the persisted unit" dev 'systemctl is-active -q pp-proxy.service'
 check "my.remarkable.com resolves to 127.0.0.1 (pp-proxy)" dev 'wget -T 2 -O /dev/null http://my.remarkable.com:9/ 2>&1 | grep -q "(127.0.0.1:9)"'
 check "pp-proxy CA in the live bundle after reboot" dev 'grep -qF "$(sed -n 2p /home/root/paper-pure/proxy/ca.crt)" /etc/ssl/certs/ca-certificates.crt'
@@ -179,6 +191,12 @@ check "pp-agent boot ran only after rm-sanity exited" dev '
     s=$(systemctl show -P ExecMainExitTimestampMonotonic rm-sanity.service)
     b=$(systemctl show -P ExecMainStartTimestampMonotonic pp-agent-boot.service)
     echo "rm-sanity exited at $s us, pp-agent boot started at $b us"; [ "$s" -gt 0 ] && [ "$b" -gt "$s" ]'
+check "pp-agent-tripletap (the triple-press kill switch) runs from the persisted unit" dev '
+    for i in $(seq 1 40); do systemctl is-active -q pp-agent-tripletap.service && exit 0; sleep 3; done; exit 1'
+check "pp-agent-tripletap started only after rm-sanity exited" dev '
+    s=$(systemctl show -P ExecMainExitTimestampMonotonic rm-sanity.service)
+    b=$(systemctl show -P ExecMainStartTimestampMonotonic pp-agent-tripletap.service)
+    echo "rm-sanity exited at $s us, pp-agent-tripletap started at $b us"; [ "$s" -gt 0 ] && [ "$b" -gt "$s" ]'
 
 t "7. uninstall puts the root fs back to stock"
 "$REPO/device/install.sh" -p "$PORT" -i "$WORK/id" --uninstall root@127.0.0.1 > "$WORK/7-uninstall.log" 2>&1
@@ -189,8 +207,202 @@ check "swupdate.service is enabled again (stock)" dev '[ "$(systemctl is-enabled
 check "no freeze block in /etc/hosts" dev '! grep -q "paper-pure freeze" /etc/hosts'
 check "stock /etc/hosts lines still there" dev 'grep -q "^127.0.0.1.*localhost" /etc/hosts'
 check "pp-agent-boot no longer enabled" dev '! test -e /etc/systemd/system/multi-user.target.wants/pp-agent-boot.service'
+check "pp-agent-tripletap no longer enabled" dev '! test -e /etc/systemd/system/multi-user.target.wants/pp-agent-tripletap.service'
 inst > /dev/null 2>&1
 check "and install brings it all back" inst --verify > /dev/null 2>&1
+
+t "9. kill switch and crash loops: real pp-agent, real mods hooks, systemd 255"
+# Test releases: mods/release/hooks/*.sh as shipped, upstream's xovi/start and
+# xovi/stock at the pinned commit, a stub hashtab, and no xovi.so (ld.so skips
+# a preload it can't find). fake-xochitl crashes when it runs with xovi
+# preloaded and the live tree has xovi/crash ("slow": after 5 s, "fast": at once).
+upstream_xovi_setup() { # DIR: upstream's start and stock at the versions.lock pin
+    local url pin g f
+    read -r url pin < <(awk '$1 == "rm-xovi-extensions" { print $2, $3 }' "$REPO/mods/versions.lock")
+    g=$REPO/mods/.cache/git/rm-xovi-extensions
+    git -C "$g" cat-file -e "$pin^{commit}" 2> /dev/null || { g=$WORK/rm-xovi-extensions; [ -d "$g/.git" ] || git clone -q "$url" "$g"; }
+    mkdir -p "$1"
+    for f in start stock; do git -C "$g" show "$pin:xovi-setup/$f" > "$1/$f"; done
+}
+mktree() { # ID [CRASH-MODE]
+    local tr=$WORK/trees9/$1
+    rm -rf "$tr"; mkdir -p "$tr/hooks" "$tr/checks" "$tr/xovi/services/xochitl.service" "$tr/xovi/paper-pure"
+    cp "$REPO"/mods/release/hooks/*.sh "$tr/hooks/"
+    cp "$WORK/xovi-setup/start" "$WORK/xovi-setup/stock" "$tr/xovi/"
+    printf '[Service]\nEnvironment="PP_TEST_RELEASE=%s"\n' "$1" > "$tr/xovi/services/xochitl.service/pp-test.conf"
+    printf '#!/bin/sh\necho "hashtab: stub (test bed)"\n' > "$tr/xovi/paper-pure/hashtab"
+    if [ -n "${2:-}" ]; then echo "$2" > "$tr/xovi/crash"; fi
+    cat > "$tr/checks/10-preload.sh" << 'EOF'
+#!/bin/sh
+# xochitl runs with this release's xovi drop-in (what xovi/start writes).
+env=$(tr '\000' '\n' < "/proc/$(systemctl show -P MainPID xochitl.service)/environ")
+echo "$env" | grep -qx 'LD_PRELOAD=/home/root/xovi/xovi.so' && echo "$env" | grep -qx "PP_TEST_RELEASE=$PP_RELEASE_ID"
+EOF
+    chmod +x "$tr"/hooks/*.sh "$tr"/checks/*.sh "$tr"/xovi/start "$tr"/xovi/stock "$tr"/xovi/paper-pure/hashtab
+}
+N9=0
+publish9() { # ID: sign it, make it latest, copy the feed onto the test bed
+    N9=$((N9 + 1))
+    "$REPO/agent/out/ppsign" pack -key "$KEYS/release.key.pem" -dir "$WORK/trees9/$1" -id "$1" -os "$TAG" \
+        -created "2026-10-25T12:$(printf %02d "$N9"):00Z" -out "$WORK/feed9/releases/tatsu" -latest > /dev/null
+    tar -C "$WORK/feed9" -cf - . | dev 'rm -rf /home/root/pp-test/feed && mkdir -p /home/root/pp-test/feed && tar -xf - -C /home/root/pp-test/feed'
+}
+test_up() { # after every boot: the feed on the test bed itself, and no timer runs in between our steps
+    dev 'systemctl stop pp-agent.timer
+        systemctl is-active -q pp-test-feed || systemd-run -q --collect --unit pp-test-feed /home/root/pp-test/ppsign serve -dir /home/root/pp-test/feed -addr 127.0.0.1:3098'
+}
+pst() { # FIELD of `pp-agent status`
+    dev /home/root/paper-pure/bin/pp-agent status | python3 -I -c 'import json,sys; v=json.load(sys.stdin).get(sys.argv[1], ""); print(v if isinstance(v,str) else json.dumps(v))' "$1"
+}
+# shellcheck disable=SC2317
+xenv() { dev 'tr "\000" "\n" < "/proc/$(systemctl show -P MainPID xochitl.service)/environ"'; }
+# shellcheck disable=SC2317  # called through check()
+preloaded() { # xochitl runs with the xovi drop-in of release $1
+    local env
+    env=$(xenv)
+    grep -qx 'LD_PRELOAD=/home/root/xovi/xovi.so' <<< "$env" && grep -qx "PP_TEST_RELEASE=$1" <<< "$env"
+}
+# shellcheck disable=SC2317
+stock_ui() { local env; env=$(xenv) && [ -n "$env" ] && ! grep -q '^LD_PRELOAD=' <<< "$env"; }
+press() { # N quick presses on the stand-in power key, as the kernel reports them
+    python3 -I -c '
+import struct, sys, time
+t = time.time()
+for i in range(int(sys.argv[1])):
+    s = t + 0.4 * i
+    for typ, code, val in ((1, 116, 1), (0, 0, 0), (1, 116, 0), (0, 0, 0)):
+        sys.stdout.buffer.write(struct.pack("<qqHHi", int(s), int(s % 1 * 1e6), typ, code, val))
+' "$1" | docker exec -i "$C" sh -c 'cat > /home/root/pp-test/pwrkey'
+}
+# shellcheck disable=SC2317
+wait_run() { # LAST_RUN TEXT: a pp-agent run newer than LAST_RUN ended with TEXT in its result
+    local r=""
+    for _ in $(seq 1 60); do
+        if [ "$(pst last_run)" != "$1" ]; then r=$(pst last_result); case $r in *"$2"*) return 0 ;; esac; fi
+        sleep 3
+    done
+    echo "  last_result: ${r:-?}"; return 1
+}
+# shellcheck disable=SC2317
+agent_booted() { # pp-agent-boot has run this boot and the triple-press service is up
+    dev 'for i in $(seq 1 100); do
+        [ "$(systemctl show -P ExecMainExitTimestampMonotonic pp-agent-boot.service)" != 0 ] && systemctl is-active -q pp-agent-tripletap.service && exit 0
+        sleep 3; done; exit 1'
+}
+boots() { dev 'wc -l < /pp-state/boots.log'; }
+# shellcheck disable=SC2317
+counter_ok() { # FROM-LINE: no slot switch, and every boot after that line counted 1
+    ! dev 'test -e /pp-state/spl-switched' && ! dev 'cat /pp-state/boots.log' | sed -n "$(($1 + 1)),\$p" | grep 'ecnt=' | grep -qv 'ecnt=1$'
+}
+agent_json() { # EXTRA-JSON-FIELDS
+    dev 'cat > /home/root/paper-pure/agent.json' << EOF
+{"feed_url": "http://127.0.0.1:3098/releases/tatsu/", "status_url": "http://127.0.0.1:3098/status",
+ "require_wifi": false, "battery_floor": 0, "stable_seconds": 15,
+ "power_key_device": "/home/root/pp-test/pwrkey"$1}
+EOF
+    dev 'systemctl restart pp-agent-tripletap.service'
+}
+
+rm -rf "$WORK/trees9" "$WORK/feed9"; mkdir -p "$WORK/trees9" "$WORK/feed9/releases/tatsu"
+upstream_xovi_setup "$WORK/xovi-setup"
+mktree tb1; mktree tb2 slow; mktree tb3 fast
+dev 'cat > /home/root/pp-test/ppsign && chmod +x /home/root/pp-test/ppsign' < "$REPO/agent/out/ppsign-arm64"
+agent_json ""
+test_up
+publish9 tb1
+dev 'systemctl start pp-agent.service' > /dev/null 2>&1 || true   # the real unit; a oneshot, so this waits
+check "9a. pp-agent installs tb1 (real hooks, health check)" [ "$(pst committed)" = tb1 ]
+check "9a. upstream's xovi/start drop-in reaches xochitl under systemd" preloaded tb1
+check "9a. the drop-in is a tmpfs over the /etc overlay" dev 'grep -q " /etc/systemd/system/xochitl.service.d tmpfs " /proc/mounts'
+check "9a. pp-agent marks mods live" [ "$(pst live)" = tb1 ]
+
+r=$(pst last_run); press 3
+check "9b. triple-press: mods off" wait_run "$r" "tripletap: mods off (tb1)"
+check "9b. xochitl runs stock" stock_ui
+check "9b. drop-in unmounted" dev '! grep -q " /etc/systemd/system/xochitl.service.d " /proc/mounts'
+check "9b. live marker cleared" [ "$(pst live)" = "" ]
+r=$(pst last_run); press 2; sleep 10
+check "9c. two presses change nothing" [ "$(pst last_run)" = "$r" ]
+press 3
+check "9c. triple-press again: mods on, through activate and the health check" wait_run "$r" "tripletap: mods on (tb1)"
+check "9c. xovi back in xochitl" preloaded tb1
+
+t "9d. reboot returns stock (activate_on_boot defaults to false); triple-press brings mods back"
+reboot
+check "9d. pp-agent boot ran and the triple-press service is up" agent_booted
+test_up
+check "9d. pp-agent boot stayed stock" dev 'journalctl -b -u pp-agent-boot.service --no-pager | grep -q "activate_on_boot is off"'
+check "9d. xochitl runs stock after the reboot" stock_ui
+check "9d. pp-agent-tripletap started only after rm-sanity" dev '
+    [ "$(systemctl show -P ExecMainStartTimestampMonotonic pp-agent-tripletap.service)" -gt "$(systemctl show -P ExecMainExitTimestampMonotonic rm-sanity.service)" ]'
+r=$(pst last_run); press 3
+check "9d. triple-press: mods on" wait_run "$r" "tripletap: mods on (tb1)"
+check "9d. tb1 live" preloaded tb1
+
+t "9e. install a release that crash-loops xochitl after 5 s: rolled back, no reboot"
+n=$(boots)
+publish9 tb2
+dev 'systemctl start pp-agent.service' > /dev/null 2>&1 || true
+check "9e. tb2 marked failed, tb1 still committed" [ "$(pst committed) $(pst failed)" = 'tb1 ["tb2"]' ]
+check "9e. the health check caught it" grep -q "xochitl not stable" <<< "$(pst last_error)"
+check "9e. tb1 is live again" preloaded tb1
+check "9e. no reboot: same boot" [ "$(boots)" = "$n" ]
+check "9e. rm-emergency never ran (start limit not hit)" dev '[ "$(systemctl show -P ExecMainStartTimestampMonotonic rm-emergency.service)" = 0 ]'
+echo "  tb2 crashes before the rollback: $(dev 'journalctl -b -u xochitl.service --no-pager | grep -c "broken mod, crashing in 5 s"' || true)"
+
+t "9f. install a release that crash-loops xochitl at once: rolled back either way"
+n=$(boots)
+publish9 tb3
+dev 'systemctl start --no-block pp-agent.service'
+start9=$(date +%s)
+# Either pp-agent sees the first crash and rolls back, or the 4 starts are
+# used up first: OnFailure=emergency.target, rm-emergency.sh reboots mid-check,
+# and pp-agent boot finds Pending set and rolls back.
+while running && [ $(($(date +%s) - start9)) -lt 300 ]; do
+    f=$(pst failed 2> /dev/null) || true
+    case $f in *tb3*) [ "$(pst pending 2> /dev/null)" = "" ] && sleep 10 && break ;; esac
+    sleep 3
+done
+if running; then
+    path="pp-agent rolled back before the start limit"
+else
+    path="the OS rebooted (rm-emergency), then pp-agent boot rolled back"
+    echo "  test bed rebooted by itself after $(($(date +%s) - start9)) s"
+    boot
+    check "9f. after the emergency reboot, pp-agent boot ran" agent_booted
+    test_up
+    check "9f. pp-agent boot rolled tb3 back" dev 'journalctl -b -u pp-agent-boot.service --no-pager | grep -q "rolling back tb3"'
+fi
+echo "  path: $path"
+check "9f. tb3 marked failed, tb1 committed, nothing pending" [ "$(pst committed) $(pst failed) $(pst pending)" = 'tb1 ["tb2", "tb3"] ' ]
+check "9f. no slot switch, boot counter never above 1" counter_ok "$n"
+
+t "9g. activate_on_boot=true and a mod that crash-loops at boot: that boot ends stock"
+agent_json ', "activate_on_boot": true'
+dev 'echo slow > /home/root/paper-pure/releases/tb1/xovi/crash'   # tb1 breaks (test only)
+n=$(boots)
+reboot
+check "9g. pp-agent boot ran" agent_booted
+test_up
+check "9g. it activated tb1, saw the crash loop and went stock" dev 'journalctl -b -u pp-agent-boot.service --no-pager | grep -q "tb1 unhealthy at boot (1/3)"'
+check "9g. xochitl runs stock" stock_ui
+check "9g. the boot counted as unhealthy (guard 1/3)" [ "$(pst unhealthy_boots)" = 1 ]
+check "9g. no emergency reboot: only ours, counter 1" bash -c '[ "$1" = "$2" ]' _ "$(boots)" "$((n + 1))"
+check "9g. counter ok" counter_ok "$n"
+dev 'rm /home/root/paper-pure/releases/tb1/xovi/crash'
+agent_json ""
+
+t "9h. the kill switch file: a triple-press only turns mods off, the update unit skips"
+r=$(pst last_run); press 3
+check "9h. (no file yet) triple-press: mods on" wait_run "$r" "tripletap: mods on (tb1)"
+dev 'touch /home/root/paper-pure/disable'
+r=$(pst last_run); press 3
+check "9h. with the file: mods off" wait_run "$r" "tripletap: mods off (tb1)"
+r=$(pst last_run); press 3
+check "9h. with the file: a triple-press never turns mods on" wait_run "$r" "tripletap: mods already off"
+check "9h. xochitl stock" stock_ui
+check "9h. pp-agent.service skips while the file exists" dev 'systemctl start pp-agent.service; [ "$(systemctl show -P ConditionResult pp-agent.service)" = no ]'
+dev 'rm -f /home/root/paper-pure/disable; systemctl stop pp-test-feed' || true
 
 if [ "${PP_SLOW:-0}" = 1 ]; then
     t "8. a mod that crashes xochitl at every boot (slow): early vs after rm-sanity"

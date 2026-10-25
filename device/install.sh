@@ -103,8 +103,7 @@ if [ -n "$AGENT" ]; then
     [ -f "$AGENT_BIN" ] || { echo "build it first: make -C agent build" >&2; exit 1; }
     cp "$AGENT_BIN" "$B/pp-agent"
     cp "$REPO/agent/install.sh" "$B/"
-    mkdir -p "$B/systemd" "$B/.bin" && cp "$REPO"/agent/systemd/* "$B/systemd/"
-    cp "$REPO/device/shim/install" "$B/.bin/install"
+    mkdir -p "$B/systemd" && cp "$REPO"/agent/systemd/* "$B/systemd/"
     if [ -n "$RELEASE_PUB" ]; then cp "$RELEASE_PUB" "$B/release.pub.pem"
     elif on 'test -f /home/root/paper-pure/keys/release.pub.pem'; then
         on 'cat /home/root/paper-pure/keys/release.pub.pem' > "$B/release.pub.pem"
@@ -112,8 +111,7 @@ if [ -n "$AGENT" ]; then
     [ -n "$AGENT_JSON" ] && cp "$AGENT_JSON" "$B/agent.json"
     push "$B" /home/root/paper-pure/.stage-agent
     rm -rf "$B"
-    # The tablet has no install(1); agent/install.sh uses it, so lend it one.
-    on 'cd /home/root/paper-pure/.stage-agent && PATH=/home/root/paper-pure/.stage-agent/.bin:$PATH bash install.sh; rc=$?; rm -rf /home/root/paper-pure/.stage-agent; exit $rc'
+    on 'cd /home/root/paper-pure/.stage-agent && sh install.sh; rc=$?; rm -rf /home/root/paper-pure/.stage-agent; exit $rc'
 fi
 
 if [ -n "$PROXY" ]; then

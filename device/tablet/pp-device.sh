@@ -36,7 +36,9 @@ UPDATE_UNITS="swupdate.service swupdate.socket update-engine.service memfaultd.s
 # Root SSH on wlan0. Stock keeps it off unless the marker exists; masked, even
 # `rm-ssh-over-wlan on` can't turn it on.
 SSH_UNITS="dropbear-wlan.socket"
-AGENT_UNITS="pp-agent-boot.service pp-agent.service pp-agent.timer"
+AGENT_UNITS="pp-agent-boot.service pp-agent.service pp-agent.timer pp-agent-tripletap.service"
+# Units that turn mods on, so they wait for rm-sanity (wait-sanity.conf).
+WAIT_UNITS="pp-agent-boot.service pp-agent-tripletap.service"
 
 FAILS=0
 say()  { printf '%-7s %s\n' "$1" "$2"; }
@@ -267,19 +269,20 @@ resolves_to() { # name -> address the C library returns (via busybox wget's mess
 step_files() { # our own helpers, kept on /home (persistent)
     if [ "$HERE" != "$DEV" ]; then
         mkdir -p "$DEV"
-        cp "$HERE/pp-device.sh" "$HERE/wait-sanity.sh" "$HERE/freeze.hosts" "$HERE/pp-agent-boot-wait.conf" "$DEV/"
+        cp "$HERE/pp-device.sh" "$HERE/wait-sanity.sh" "$HERE/freeze.hosts" "$HERE/wait-sanity.conf" "$DEV/"
     fi
     chmod 0755 "$DEV/pp-device.sh" "$DEV/wait-sanity.sh"
 }
 step_agent() {
-    set_file "$SYSD/pp-agent-boot.service.d/10-pp-device.conf" "$HERE/pp-agent-boot-wait.conf" 0644
-    if [ ! -x "$PP/bin/pp-agent" ]; then info "pp-agent not installed; its units not persisted"; return 0; fi
     local u
+    for u in $WAIT_UNITS; do set_file "$SYSD/$u.d/10-pp-device.conf" "$HERE/wait-sanity.conf" 0644; done
+    if [ ! -x "$PP/bin/pp-agent" ]; then info "pp-agent not installed; its units not persisted"; return 0; fi
     for u in $AGENT_UNITS; do
         [ -f "$PP/systemd/$u" ] || die "$PP/systemd/$u missing (run agent/install.sh first)"
         set_file "$SYSD/$u" "$PP/systemd/$u" 0644
     done
     set_link "$SYSD/multi-user.target.wants/pp-agent-boot.service" ../pp-agent-boot.service
+    set_link "$SYSD/multi-user.target.wants/pp-agent-tripletap.service" ../pp-agent-tripletap.service
     set_link "$SYSD/timers.target.wants/pp-agent.timer" ../pp-agent.timer
 }
 proxy_ca_bundle() { # stdout: a bundle file's content with our CA appended once
@@ -319,6 +322,7 @@ cmd_install() {
         systemctl daemon-reload
         for u in $UPDATE_UNITS $SSH_UNITS; do systemctl stop "$u" 2>/dev/null || true; done
         [ -f "$SYSD/pp-agent.timer" ] && systemctl start pp-agent.timer
+        [ -f "$SYSD/pp-agent-tripletap.service" ] && systemctl start pp-agent-tripletap.service
         [ -f "$SYSD/pp-proxy.service" ] && { systemctl is-active -q pp-proxy.service || systemctl start pp-proxy.service; }
     fi
     echo
@@ -354,12 +358,19 @@ cmd_verify() {
     n=$(grep -c '^ssh-' /home/root/.ssh/authorized_keys 2>/dev/null || true)
     if [ "${n:-0}" -gt 0 ]; then pass "SSH keys authorized: $n"; else fail "no SSH key in /home/root/.ssh/authorized_keys"; fi
     # Boot hook and agent.
-    check_file "$SYSD/pp-agent-boot.service.d/10-pp-device.conf" "$HERE/pp-agent-boot-wait.conf" "pp-agent-boot waits for rm-sanity"
+    for u in $WAIT_UNITS; do check_file "$SYSD/$u.d/10-pp-device.conf" "$HERE/wait-sanity.conf" "${u%.service} waits for rm-sanity"; done
     if [ -x "$PP/bin/pp-agent" ]; then
         for u in $AGENT_UNITS; do check_file "$SYSD/$u" "$PP/systemd/$u" "persisted: $u"; done
         check_link "$SYSD/multi-user.target.wants/pp-agent-boot.service" ../pp-agent-boot.service "enabled: pp-agent-boot.service"
+        check_link "$SYSD/multi-user.target.wants/pp-agent-tripletap.service" ../pp-agent-tripletap.service "enabled: pp-agent-tripletap.service"
         check_link "$SYSD/timers.target.wants/pp-agent.timer" ../pp-agent.timer "enabled: pp-agent.timer"
-        [ -e "$PP/disable" ] && info "kill switch is on: $PP/disable exists (mods stay off)"
+        if have_systemd; then
+            u=$(systemctl is-active pp-agent-tripletap.service 2>/dev/null || true)
+            if [ "$u" != active ] && systemctl list-jobs --no-legend 2>/dev/null | grep -q pp-agent-tripletap; then u="queued (starts after rm-sanity)"; fi
+            case $u in active | activating | queued*) pass "triple-press kill switch: pp-agent-tripletap is $u" ;;
+            *) fail "triple-press kill switch: pp-agent-tripletap is $u (journalctl -u pp-agent-tripletap)" ;; esac
+        fi
+        [ -e "$PP/disable" ] && info "kill switch file is on: $PP/disable exists (mods stay off; triple-press only turns them off)"
     else
         info "pp-agent not installed"
     fi

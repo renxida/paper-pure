@@ -16,8 +16,7 @@ device/test/run.sh <extracted 3.27.2.2 rootfs>                  # the proof, in 
 | `install.sh` | Runs on the laptop. One SSH connection (a password is asked at most once), tar over SSH (no scp needed), then `pp-device.sh` on the tablet |
 | `tablet/pp-device.sh` | Runs on the tablet: `install`, `verify`, `uninstall`, and `persist PATH` / `restore PATH` for other lanes |
 | `tablet/freeze.hosts` | The `/etc/hosts` block that sends update hosts to `0.0.0.0` |
-| `tablet/wait-sanity.sh`, `tablet/pp-agent-boot-wait.conf` | Mods wait for `rm-sanity` at boot (see "Never brick") |
-| `shim/install` | A stand-in for `install(1)`, which the tablet lacks. `agent/install.sh` needs it |
+| `tablet/wait-sanity.sh`, `tablet/wait-sanity.conf` | Mods wait for `rm-sanity` at boot: the drop-in goes on `pp-agent-boot` and `pp-agent-tripletap` (see "Never brick") |
 | `test/run.sh`, `test/testbed/` | The stand-in tablet and the scenarios |
 
 On the tablet, everything of ours is under `/home/root/paper-pure/device/`: the scripts, `managed.list` (every root fs path we changed) and `stock/` (the stock copy of each, taken before the first change).
@@ -52,9 +51,9 @@ Not used: an `AutoUpdate` key exists in xochitl's settings code, but the Updates
 
 ## Never brick
 
-- **Mods wait for rm-sanity.** The boot ROM counts boot attempts per slot and switches slot past a limit (SPL strings: `ABINFO: A (ecnt = %u)`, `A in error state, switch to B`, and with both slots bad, recovery mode, which needs a cable). `rm-sanity.service` clears the count 60 s after boot. If a mod crashes xochitl before that, the stock units (`StartLimitBurst=4`, `OnFailure=emergency.target`, `rm-emergency.sh` reboots) loop the tablet, and the count climbs to a slot switch onto an unfrozen OS. So `pp-agent-boot.service` gets a drop-in: `ExecStartPre=wait-sanity.sh` waits until `rm-sanity` has run this boot and `root<slot>_errcnt` is 0, up to 5 minutes, else mods stay off this boot. A mod crash loop then costs one reboot per try with the count at 1, and pp-agent's own boot guard (3 unhealthy boots, then stock) ends it.
+- **Mods wait for rm-sanity.** The boot ROM counts boot attempts per slot and switches slot past a limit (SPL strings: `ABINFO: A (ecnt = %u)`, `A in error state, switch to B`, and with both slots bad, recovery mode, which needs a cable). `rm-sanity.service` clears the count 60 s after boot. If a mod crashes xochitl before that, the stock units (`StartLimitBurst=4`, `OnFailure=emergency.target`, `rm-emergency.sh` reboots) loop the tablet, and the count climbs to a slot switch onto an unfrozen OS. So the two units that can turn mods on, `pp-agent-boot.service` and `pp-agent-tripletap.service`, get a drop-in: `ExecStartPre=wait-sanity.sh` waits until `rm-sanity` has run this boot and `root<slot>_errcnt` is 0, up to 5 minutes, else that unit fails (the triple-press service retries). The update timer starts at 3 minutes. A mod crash loop then costs at most one reboot per try with the count at 1, and the agent rolls the release back (`agent/README.md`, "Why a crash loop can't brick it").
 - The wait has a cost: `pp-agent-boot` is a oneshot wanted by `multi-user.target`, so `multi-user.target` is reached about 60 s after boot instead of about 20 s. Nothing of reMarkable's is ordered after it (only stock `graphical.target` and `systemd-boot-check-no-failures`, neither used). xochitl starts as before.
-- **Kill switches.** `touch /home/root/paper-pure/disable` (pp-agent's switch, then reboot). Reboot is stock unless pp-agent activates a release. Triple-press needs xovi-tripletap in toggle mode, not installed yet (see `mods/README.md`); its unit should go in with `pp-device.sh persist`.
+- **Kill switches, no cable needed.** Triple-press power toggles mods (`pp-agent-tripletap.service`, persisted here like the other agent units). Reboot is stock (`activate_on_boot` is false by default). A failing release rolls back by itself. Over SSH: `touch /home/root/paper-pure/disable`, and nothing turns mods on.
 - **Undo.** `--uninstall` restores every path in `managed.list` from `stock/`.
 
 ## SSH is private
@@ -72,9 +71,9 @@ Nothing here touches xochitl, its unit, the pen or display stack. We stop update
 ## For other lanes
 
 - `pp-device.sh persist PATH...` copies PATH as it is live into the real root fs (backing up stock first). `pp-device.sh restore PATH...` puts it back. Use these instead of `umount -R /etc`.
-- **agent**: `agent/install.sh` calls `install`, which the tablet does not have (no coreutils; its busybox has no `install` applet). `device/install.sh` lends it `shim/install` on `PATH`. Better: use `cp` and `chmod` there.
+- **agent**: `agent/install.sh` uses only `cp`, `chmod` and `mv` (the tablet has no `install(1)`), and `install.sh --agent` copies every unit in `agent/systemd/`. `pp-device.sh` persists the four units, their wants links and the rm-sanity drop-ins (`AGENT_UNITS`, `WAIT_UNITS`).
 - **server**: `device/install.sh --proxy` runs `tablet-proxy/install.sh --runtime`, then persists the unit, its `multi-user.target.wants` link, the `# pp-proxy` hosts block (from `pp-proxy hosts`) and the CA bundle with `pp-device.sh`. Its own persistent mode (`umount -R /etc`) is not used.
-- **mods**: tripletap's unit should go in with `pp-device.sh persist`. Its `enable.sh` does `umount -R /etc`.
+- **mods**: the triple-press is `pp-agent tripletap`, not xovi-tripletap (whose `enable.sh` does `umount -R /etc`).
 
 ## Status
 
