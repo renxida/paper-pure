@@ -1,0 +1,5 @@
+#!/bin/bash
+# rmfakecloud's admin CLI as the right user, against the live data dir:
+#   rmfakecloud-cli setuser -u cedar -a      (prints a new password)
+#   rmfakecloud-cli listusers
+exec setpriv --reuid=pp --regid=pp --init-groups env DATADIR="${PP_DATA:-/data}/rmfakecloud" rmfakecloud "$@"

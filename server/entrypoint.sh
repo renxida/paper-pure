@@ -12,8 +12,23 @@ export DATADIR="$D/rmfakecloud" PORT=3000
 : "${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set (openssl rand -base64 48), or every restart logs the tablet out}"
 export STORAGE_URL="${STORAGE_URL:-https://local.appspot.com}" RM_HTTPS_COOKIE="${RM_HTTPS_COOKIE:-true}"
 
+# A restore staged by restore.sh is swapped in here, before anything runs.
+if [ -f "$D/.restore/READY" ]; then
+    old="$D/.pre-restore-$(date -u +%Y%m%dT%H%M%SZ)"
+    echo "entrypoint: applying staged restore; old data kept in $old"
+    mkdir -p "$old"
+    for d in rmfakecloud pp; do
+        if [ -e "$D/$d" ]; then mv "$D/$d" "$old/"; fi
+        if [ -e "$D/.restore/staging$D/$d" ]; then mv "$D/.restore/staging$D/$d" "$D/$d"; fi
+    done
+    rm -rf "$D/.restore"
+fi
+
 mkdir -p "$DATADIR" "$D/pp"
 chown -R pp:pp "$D"   # files a root shell or a restore left behind
+case "${RESTIC_REPOSITORY:-}" in   # a local repo (the restore drill) must be ours too
+    /*) mkdir -p "$RESTIC_REPOSITORY" && chown pp:pp "$RESTIC_REPOSITORY" ;;
+esac
 as_pp() { setpriv --reuid=pp --regid=pp --init-groups --inh-caps=-all "$@"; }
 
 as_pp rmfakecloud &
@@ -41,7 +56,7 @@ else
     echo "entrypoint: RESTIC_REPOSITORY not set, no backups"
 fi
 
-stop() { kill -TERM $(jobs -p) 2>/dev/null || true; wait; }
+stop() { jobs -p | xargs -r kill -TERM 2>/dev/null || true; wait; }
 trap 'stop; exit 0' TERM INT
 wait -n
 echo "entrypoint: a daemon exited; stopping the container" >&2
