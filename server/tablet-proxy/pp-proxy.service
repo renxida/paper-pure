@@ -1,11 +1,18 @@
 # Stock sync (xochitl, rm-sync) -> /etc/hosts -> 127.0.0.1:443 -> this proxy
 # -> our server through Cloudflare Access. Sync is not a mod: this runs in
 # stock mode too, and the mods kill switch (paper-pure/disable) leaves it on.
+#
+# Never order this (or any unit of ours) Before= xochitl or anything xochitl
+# needs. With a passcode set, /home is unlocked only after the passcode is
+# typed into xochitl (homecryptor -> homekey -> systemd-ask-password, answered
+# by xochitl's pincode module). This unit needs /home, so Before=xochitl made
+# xochitl wait for /home: its 60 s JobTimeoutSec ran out, OnFailure=
+# emergency.target rebooted, every boot. rm-sync already waits for /home.
 [Unit]
 Description=paper-pure sync proxy (reMarkable cloud names -> our server)
 RequiresMountsFor=/home/root/paper-pure
 After=network.target
-Before=xochitl.service
+Before=rm-sync.service
 ConditionPathExists=/home/root/paper-pure/bin/pp-proxy
 ConditionPathExists=/home/root/paper-pure/proxy/cert.pem
 
