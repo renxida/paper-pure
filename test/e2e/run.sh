@@ -268,9 +268,9 @@ step_freeze() {
     for u in update-engine.service swupdate.service swupdate.socket memfaultd.service; do has "verify" "$v" "PASS    masked: $u"; done
     has "verify" "$v" "PASS    setting: Updates switch is off for good"
     for n in device.cloud.remarkable.com device.memfault.com enterprise.cloud.remarkable.com remarkable-software.s3.us-east-2.amazonaws.com; do
-        has "verify" "$v" ": $n"
+        if grep -qE "^PASS +resolves to .*: $n\$" <<<"$v"; then ok "verify: $n resolves to nothing"; else die "verify: $n not blocked"; fi
     done
-    hasnt "verify" "$v" "FAIL"
+    hasnt "verify: no FAIL line" "$v" "FAIL"
     eq "update-engine never started this boot" "$(dev 'systemctl show -P ActiveEnterTimestampMonotonic update-engine.service')" 0
     # Settings > General > Software (unpaired layout), then try to turn updates on.
     open_settings
@@ -395,6 +395,7 @@ step_ota() {
     until_ok 60 "xovi back on with $good" xovi_on
 
     # 3. Signed with a key the device doesn't trust: refused, nothing downloaded.
+    rm -rf "$W/keys-forged"
     "$REPO/agent/out/ppsign" keygen -out "$W/keys-forged" >/dev/null
     pack "$W/keys-forged/release.key.pem" "$(release_tree "$forged")" "$forged" "$OS"
     publish "$forged"

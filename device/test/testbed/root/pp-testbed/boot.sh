@@ -73,6 +73,14 @@ for u in systemd-udevd.service systemd-udevd-control.socket systemd-udevd-kernel
     ln -sf /dev/null /run/systemd/system/$u
 done
 
+# memfaultd can't run in a container and fails. Under qemu each try takes
+# seconds, so it never hits its start limit and restarts forever, and
+# install's mask + daemon-reload landing on a pending restart crashed
+# systemd 255 ("Code should not be reached ... service_enter_start()",
+# PID 1 aborts). One try is enough to see it start.
+mkdir -p /run/systemd/system/memfaultd.service.d
+printf '[Service]\nRestart=no\n' > /run/systemd/system/memfaultd.service.d/zz-pptest.conf
+
 # xochitl needs the e-ink panel. Keep the stock unit and the stock drop-in's
 # settings (RestartMode=direct, OnFailure=emergency.target, start limit),
 # minus the DRM device it waits for, and run a stand-in that pets the watchdog.
