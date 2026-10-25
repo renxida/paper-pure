@@ -1,0 +1,13 @@
+# Check for a release a few minutes after boot, then every 30 minutes
+# while awake. It never wakes the tablet from sleep.
+[Unit]
+Description=paper-pure agent: check for releases
+
+[Timer]
+OnBootSec=3min
+OnUnitInactiveSec=30min
+RandomizedDelaySec=2min
+Unit=pp-agent.service
+
+[Install]
+WantedBy=timers.target

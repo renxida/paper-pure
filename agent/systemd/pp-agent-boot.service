@@ -1,0 +1,17 @@
+# Once per boot: finish an interrupted install (roll back), apply the
+# boot-loop guard, then activate the current release. This is the ONLY
+# thing that turns mods on at boot.
+[Unit]
+Description=paper-pure agent: boot (rollback leftovers, boot-loop guard, activate)
+RequiresMountsFor=/home/root/paper-pure
+After=xochitl.service
+ConditionPathExists=/home/root/paper-pure/bin/pp-agent
+ConditionPathExists=!/home/root/paper-pure/disable
+
+[Service]
+Type=oneshot
+ExecStart=/home/root/paper-pure/bin/pp-agent boot
+TimeoutStartSec=10min
+
+[Install]
+WantedBy=multi-user.target

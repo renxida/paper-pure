@@ -1,0 +1,16 @@
+# Pull and install a signed release. Started by pp-agent.timer. Exits fast
+# when not on Wi-Fi or below the battery floor.
+[Unit]
+Description=paper-pure agent: pull and install a signed release
+RequiresMountsFor=/home/root/paper-pure
+After=pp-agent-boot.service
+ConditionPathExists=/home/root/paper-pure/bin/pp-agent
+ConditionPathExists=!/home/root/paper-pure/disable
+
+[Service]
+Type=oneshot
+ExecStart=/home/root/paper-pure/bin/pp-agent update
+TimeoutStartSec=30min
+# Stay out of the pen's way.
+Nice=10
+IOSchedulingClass=idle

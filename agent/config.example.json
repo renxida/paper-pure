@@ -1,0 +1,12 @@
+{
+  "feed_url": "https://paper-pure.example.org/releases/tatsu/",
+  "status_url": "https://paper-pure.example.org/api/tablet/status",
+  "headers": {
+    "CF-Access-Client-Id": "REPLACE.access",
+    "CF-Access-Client-Secret": "REPLACE"
+  },
+  "battery_floor": 30,
+  "stable_seconds": 45,
+  "boot_guard_max": 3,
+  "activate_on_boot": true
+}
