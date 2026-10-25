@@ -67,7 +67,11 @@ push() { # local-dir remote-dir: tar over ssh (no scp or sftp needed)
 step() { printf '\n== %s\n' "$*"; }
 
 step "connect to $TARGET"
-on 'echo "$(cat /sys/devices/soc0/machine 2>/dev/null || echo unknown device), OS $(. /etc/os-release; echo $IMG_VERSION)"'
+for try in 1 2 3; do   # a USB link that just came up can reset the first try
+    on 'echo "$(cat /sys/devices/soc0/machine 2>/dev/null || echo unknown device), OS $(. /etc/os-release; echo $IMG_VERSION)"' && break
+    [ "$try" = 3 ] && { echo "cannot reach $TARGET over SSH" >&2; exit 1; }
+    sleep 3
+done
 
 if [ "$MODE" = verify ]; then
     push "$REPO/device/tablet" /tmp/pp-device-verify

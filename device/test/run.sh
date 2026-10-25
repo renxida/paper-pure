@@ -50,13 +50,22 @@ inst() { "$REPO/device/install.sh" -p "$PORT" -i "$WORK/id" --key "$WORK/id.pub"
 
 # ------------------------------------------------------------- container
 cleanup() {
-    [ "${PP_KEEP:-0}" = 1 ] && { echo "kept: container $C (ssh -p $PORT root@127.0.0.1, key $WORK/id)"; return; }
     docker rm -f "$C" > /dev/null 2>&1 || true
     docker volume rm "$C-home" "$C-data" "$C-state" > /dev/null 2>&1 || true
 }
-trap cleanup EXIT
+# shellcheck disable=SC2317  # run by the EXIT trap
+on_exit() {
+    if [ "${PP_KEEP:-0}" = 1 ]; then echo "kept: container $C (ssh -p $PORT root@127.0.0.1, key $WORK/id)"; else cleanup; fi
+}
+trap on_exit EXIT
 cleanup
 running() { [ "$(docker inspect -f '{{.State.Running}}' "$C" 2>/dev/null)" = true ]; }
+# shellcheck disable=SC2317  # called through check()
+alive() { # for checks that need the tablet up: say so if it went down on its own
+    running && return 0
+    echo "  (test bed stopped by itself: $(docker inspect -f 'exit {{.State.ExitCode}} at {{.State.FinishedAt}}' "$C"))"
+    return 1
+}
 boot() { # start the container and wait for systemd to settle and SSH to answer
     docker start "$C" > /dev/null
     local start st
@@ -101,6 +110,7 @@ check "verify changed nothing on the tablet" dev '! test -e /home/root/paper-pur
 t "2. install"
 inst > "$WORK/2-install.log" 2>&1 && rc=0 || rc=$?
 check "install exits 0" [ "$rc" = 0 ]
+check "the test bed stayed up" alive
 check "install ends with all checks passed" grep -q 'pp-device: all checks passed' "$WORK/2-install.log"
 check "fresh SSH connection works after install" grep -q 'PASS    fresh SSH connection' "$WORK/2-install.log"
 check "/ is read-only again" dev 'awk '\''$2=="/"{o=$4} END{exit !(o ~ /^ro/)}'\'' /proc/mounts'
@@ -122,7 +132,7 @@ for u in swupdate.service update-engine.service memfaultd.service; do
     check "$u never started this boot" dev "[ \"\$(systemctl show -P InactiveExitTimestampMonotonic $u)\" = 0 ]"
 done
 check "dropbear-wlan.socket masked" dev '[ "$(systemctl is-enabled dropbear-wlan.socket)" = masked ]'
-check "boot ROM counter is 1 at boot, then rm-sanity clears it" dev '
+check "rm-sanity clears the boot ROM counter" dev '
     echo "  counter after boot: $(cat /sys/devices/platform/lpgpr/roota_errcnt)"
     for i in $(seq 1 60); do [ "$(systemctl show -P ExecMainExitTimestampMonotonic rm-sanity.service)" != 0 ] && break; sleep 3; done
     [ "$(cat /sys/devices/platform/lpgpr/roota_errcnt)" = 0 ]'
