@@ -111,8 +111,8 @@ What happened and what changed:
 
 Results:
 
-- On GitHub, run 19 (`440bb5a`, the fix) passed end to end, as user `runner` on native arm64. The device test bed took 687 s.
-- In the dev container (root, qemu, cgroup v1), scenarios 1 to 7 and 9a to 9c gave 73 checks, 0 failed. A tool time limit cut that run off in 9c.
+- On GitHub, runs 19 (`440bb5a`, the fix) and 20 (`21ee294`, docs) passed end to end, as user `runner` on native arm64. The device test bed took 687 s in run 19.
+- In the dev container (root, qemu, cgroup v1), `PP_NAME=pp-fix-tb device/test/run.sh` gave **108 passed, 0 failed** in 46 min, with no container or volume left behind (98 before the new scenarios).
 - The mechanism of the dropped session, shown in a plain tatsu container (`pp-device.sh install | head -n 2`):
   - The old script ends at its third line with `pipeline rc=141`.
   - The new one runs to the end: 6 masks, the hosts block, 10 managed paths, and its log ends with the verdict.

@@ -127,7 +127,7 @@ One more honest note: the release job rebuilds from the same commit rather than 
 
 ## Status
 
-Oct 25 2026. On GitHub, runs 8, 9 and 10 on this branch were green end to end: `rung1` on `ubuntu-latest`, `proofs` and `rung2` on `ubuntu-24.04-arm` as user `runner` (rung2 about 13 min natively, all 11 e2e steps). Earlier runs failed on the root vs `runner` issues above, then once on an e2e race: `pp-agent.timer` installed the release before the `ota` step asked for it. The `ota` step now stops the timer first, and every e2e step prints a heartbeat each minute and, on failure, its FAIL lines and the last 80 lines of its log. The release job has run on no `main` push yet. Runs 13, 14, 16 and 18 failed in the device test bed because the test bed was online and got a real OS update (above). Since run 19 the test bed has no network, and run 19 was green end to end.
+Oct 25 2026. On GitHub, runs 8, 9 and 10 on this branch were green end to end: `rung1` on `ubuntu-latest`, `proofs` and `rung2` on `ubuntu-24.04-arm` as user `runner` (rung2 about 13 min natively, all 11 e2e steps). Earlier runs failed on the root vs `runner` issues above, then once on an e2e race: `pp-agent.timer` installed the release before the `ota` step asked for it. The `ota` step now stops the timer first, and every e2e step prints a heartbeat each minute and, on failure, its FAIL lines and the last 80 lines of its log. The release job has run on no `main` push yet. Runs 13, 14, 16 and 18 failed in the device test bed because the test bed was online and got a real OS update (above). Since run 19 the test bed has no network; runs 19 and 20 were green end to end.
 
 Review fixes, checked here (x86_64 dev container):
 
