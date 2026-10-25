@@ -20,8 +20,8 @@
 int rmemu_debug;
 static const char *fakeroot = "/opt/rmemu/root";
 // systemd itself (PID 1, and its systemd-* daemons) needs none of this: the
-// fake tree is also bind-mounted at the real /sys paths. Nor does rmemud,
-// which feeds the real /dev/input FIFOs. Faking for them
+// fake tree is also bind-mounted at the real /sys paths. Nor do rmemud,
+// which feeds the real /dev/input FIFOs, and rmemu-wifi. Faking for them
 // breaks them: PID 1 aborts when realpath() answers outside /sys, logind
 // crashes on a fake device monitor. Leave them alone.
 int rmemu_off;
@@ -297,7 +297,7 @@ static void on_crash(int sig, siginfo_t *si, void *ucp) {
 
 __attribute__((constructor)) static void init(void) {
     const char *me = program_invocation_short_name ? program_invocation_short_name : "";
-    if (getpid() == 1 || !strncmp(me, "systemd", 7) || !strcmp(me, "rmemud")) { rmemu_off = 1; return; }
+    if (getpid() == 1 || !strncmp(me, "systemd", 7) || !strncmp(me, "rmemu", 5)) { rmemu_off = 1; return; }
     const char *d = getenv("RMEMU_DEBUG");
     rmemu_debug = (d && strcmp(d, "0")) || access("/run/rmemu-debug", F_OK) == 0;
     if (getenv("RMEMU_FAKEROOT")) fakeroot = getenv("RMEMU_FAKEROOT");

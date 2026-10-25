@@ -80,7 +80,7 @@ for u in systemd-udevd.service systemd-udevd-control.socket systemd-udevd-kernel
          growfs-home.service growpart-home.service dm-persist-create.service dm-early-uevent.service \
          remarkable-fs-check.service remarkable-wakesrc-init.service usb-ether-once.service \
          dev-zram0.swap zram-swap.service chronyd.service bluetooth.service var-lib-bluetooth.mount \
-         wpa_supplicant.service prepare_wifi.service \
+         prepare_wifi.service \
          systemd-networkd.service systemd-networkd.socket systemd-network-generator.service \
          systemd-networkd-wait-online.service \
          hostname-from-devconfig.service dhcp-role-from-devconfig.service \

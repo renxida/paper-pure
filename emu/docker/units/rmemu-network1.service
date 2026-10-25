@@ -1,0 +1,18 @@
+# Emulator only: networkd's OnlineState for xochitl (org.freedesktop.network1).
+# networkd itself can't run here (no CAP_NET_ADMIN, netlink under qemu-user);
+# wlan0 is already configured by docker. "online" while wlan0 has the default
+# route. Runs as systemd-network, which the stock D-Bus policy lets own the name.
+[Unit]
+Description=Emulator network state (rmemu-wifi network1)
+Before=xochitl.service
+
+[Service]
+Type=dbus
+BusName=org.freedesktop.network1
+User=systemd-network
+ExecStart=/opt/rmemu/rmemu-wifi network1
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target
