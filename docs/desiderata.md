@@ -103,9 +103,9 @@ First move: stand up the emulator (rung 2) and run a trivial AppLoad "hello" app
 
 - [x] Which OS version shipped on this unit? **3.27.2.2** (Settings, General, Software; checked Oct 25, 2026). It decides which xovi, AppLoad, and rmfakecloud versions apply, and which rootfs the emulator runs. The unit is not paired with the reMarkable cloud, and that is how it stays
 - [x] Is that version inside rmfakecloud's tested range (up to 3.27.1)? **No**, it is one patch release newer, and rmfakecloud says newer releases are untested. Sync is the riskiest piece: prove it in the emulator before freezing on 3.27.2.2. A downgrade to 3.27.1 is the fallback, and it needs a 3.27.1 image to exist
-- [ ] Until the update block is in place, keep the tablet off Wi-Fi (flight mode on) so it can't move past 3.27.2.2 on its own
-- [ ] Can we get the Pure's root filesystem without dev mode (from a public update image), or only off the device after dev mode?
-- [ ] Which machine runs the emulator: an Apple Silicon Mac, or an arm64 Linux box in the cloud?
+- [ ] Until the update block is in place, keep the tablet off Wi-Fi (flight mode on) so it can't move past 3.27.2.2 on its own. Newer Pure builds already exist (3.27.3.0, 3.28.0.172, 3.29.0.153), and the stock updater polls every 30 minutes
+- [x] Can we get the Pure's root filesystem without dev mode? **Yes.** The exact 3.27.2.2 update image (codename `tatsu`, sha256 `2c64bea8…a997d`) is on the public S3 mirror codexctl uses, and its `sw-description` signature verifies against reMarkable's update key
+- [ ] Which machine runs the emulator? Leaning arm64 Linux: GitHub's free `ubuntu-24.04-arm` runners work since this repo is public. x86 Linux through qemu-user is being tried for cloud dev containers
 - [ ] Which managed host for the server?
 
 ## Sources
