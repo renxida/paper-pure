@@ -6,6 +6,8 @@
 #include <sys/types.h>
 
 extern int rmemu_debug;
+// Set in systemd and its own daemons: every hook passes straight through.
+extern int rmemu_off;
 #define LOG(...) do { fprintf(stderr, "[rmemu] " __VA_ARGS__); fputc('\n', stderr); } while (0)
 // Per-call tracing (every hardware path, dlopen, ...); RMEMU_DEBUG=1 enables it.
 #define TRACE(...) do { if (rmemu_debug) LOG(__VA_ARGS__); } while (0)

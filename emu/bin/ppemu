@@ -39,7 +39,8 @@ const HELP = `ppemu — reMarkable Paper Pure (tatsu) emulator
 Lifecycle
   setup [version] [--swu FILE]   get firmware (default ${DEFAULT_VERSION}), verify it, build ${IMAGE}:<version>
   start [version]           boot the emulator and the simulator UI
-  stop                      shut it down (device data is kept)
+  stop                      shut it down cleanly (device data is kept)
+  reboot                    reboot the device and wait for its UI (= stop + start)
   rebuild                   rebuild the image from shim/daemon/docker changes and reboot (data kept)
   reset                     stop and wipe device data (factory reset)
   status                    what's running
@@ -63,10 +64,10 @@ Drive it (coordinates are device pixels, portrait 1404x1872)
 
 Develop
   ssh [cmd...]              like ssh root@10.11.99.1 on a dev-mode device
-  push LOCAL REMOTE         copy into the device
-  pull REMOTE LOCAL         copy out of the device
+  push LOCAL REMOTE         copy a file or directory into the device
+  pull REMOTE LOCAL         copy a file or directory out of the device
   restart [--debug]         restart xochitl, wait for its UI (--debug: shim traces every hardware access)
-  logs [-f]                 container log
+  logs [-f]                 console log: the device's journal (full journal: ppemu ssh journalctl -b)
 
 Env: PPEMU_FIRMWARE_DIR (extra place to look for .swu files), PPEMU_CONTAINER,
 PPEMU_SLOW=1|0 (qemu-user timing; default on for non-arm64 hosts).
@@ -119,6 +120,17 @@ async function api(p, body) {
 const gesture = async (g) => { const r = await (await api('/api/gesture', g)).json(); console.log(r.changed ? 'ok (screen changed)' : 'ok (no screen change)'); };
 const num = (s, name) => { const n = Number(s); if (!Number.isFinite(n)) die(`expected a number for ${name}, got ${s}`); return n; };
 const tool = () => (flags.eraser ? 'eraser' : flags.pen ? 'pen' : 'finger');
+// a | b; resolves to b's exit status (or a's, if a failed).
+function pipe(a, b) {
+  return new Promise((resolve) => {
+    const pa = spawn(a[0], a.slice(1), { stdio: ['ignore', 'pipe', 'inherit'] });
+    const pb = spawn(b[0], b.slice(1), { stdio: ['pipe', 'inherit', 'inherit'] });
+    pa.stdout.pipe(pb.stdin);
+    let ra;
+    pa.on('close', (c) => { ra = c; });
+    pb.on('close', (c) => resolve(c || ra || 0));
+  });
+}
 const status = () => fetch(UI + '/api/status').then((r) => r.json()).catch(() => ({}));
 
 // ---------------------------------------------------------------- setup
@@ -202,8 +214,16 @@ function installKey() {
   docker(['exec', CONTAINER, 'sh', '-c', `mkdir -p /home/root/.ssh && chmod 700 /home/root/.ssh && touch /home/root/.ssh/authorized_keys && (grep -qF "${pub}" /home/root/.ssh/authorized_keys || echo "${pub}" >> /home/root/.ssh/authorized_keys) && chmod 600 /home/root/.ssh/authorized_keys`], { capture: true });
 }
 
+// The image's own systemd is PID 1 (docker/boot.sh lays out the tablet's
+// mounts first). It needs to mount (SYS_ADMIN, no seccomp/AppArmor filter)
+// and the cgroup tree. / is read-only like the tablet's root partition; -t
+// gives it a console, which is `docker logs`. The network interface is
+// named wlan0, up with the default route, as on the tablet's Wi-Fi.
 function runContainer(version) {
-  const r = docker(['run', '-d', '--name', CONTAINER, '--platform', 'linux/arm64', '--hostname', 'imx93-tatsu',
+  const r = docker(['run', '-d', '-t', '--name', CONTAINER, '--platform', 'linux/arm64', '--hostname', 'imx93-tatsu',
+    '--read-only', '--cap-add', 'SYS_ADMIN', '--security-opt', 'seccomp=unconfined', '--security-opt', 'apparmor=unconfined',
+    '--cgroupns', 'host', '-v', '/sys/fs/cgroup:/sys/fs/cgroup:rw',
+    '--network', 'name=bridge,driver-opt=com.docker.network.endpoint.ifname=wlan0',
     '-p', '127.0.0.1:8888:8888', '-p', `127.0.0.1:${SSH_PORT}:22`, ...VOLUMES.flatMap(([v, p]) => ['-v', `${v}:${p}`]), `${IMAGE}:${version}`], { capture: true });
   if (r.status) die(r.stderr);
 }
@@ -239,11 +259,20 @@ async function bootWait() {
   await fetch(UI + `/api/wait?idle=${T(1500, 8000)}&min=${T(4000, 20000)}&timeout=${T(20000, 300000)}`).catch(() => {});
 }
 
-function stop() {
+// Shut down like the tablet: systemd stops every unit, then the container
+// exits. (docker stop's SIGRTMIN+3 doesn't reach systemd under qemu-user.)
+async function shutdown(how) {
+  if (!containerState()?.running) return false;
+  docker(['exec', CONTAINER, 'systemctl', how], { capture: true });
+  if (!await waitFor(() => !containerState()?.running, 120000)) docker(['stop', '-t', '5', CONTAINER], { capture: true });
+  return true;
+}
+
+async function stop() {
   const pid = serverPid();
   if (pid) process.kill(pid);
   fs.rmSync(path.join(state, 'server.pid'), { force: true });
-  if (containerState()) docker(['stop', '-t', '5', CONTAINER], { capture: true });
+  await shutdown('poweroff');
   console.log('stopped');
 }
 
@@ -255,15 +284,19 @@ const commands = {
   setup() { console.log(`ready: ${IMAGE}:${setup(pos[0])}`); },
   start: () => start(pos[0]),
   stop,
+  async reboot() {
+    if (!await shutdown('reboot')) die('emulator is not running (ppemu start)');
+    await start();
+  },
   async rebuild() {
     const version = containerState()?.image?.split(':')[1] || DEFAULT_VERSION;
     buildImage(version);
-    stop();
+    await stop();
     docker(['rm', '-f', CONTAINER], { capture: true });
     await start(version);
   },
   async reset() {
-    stop();
+    await stop();
     docker(['rm', '-f', CONTAINER], { capture: true });
     docker(['volume', 'rm', ...VOLUMES.map(([v]) => v)], { capture: true });
     // Don't claim a wipe that didn't happen (e.g. another container still uses a volume).
@@ -278,6 +311,10 @@ const commands = {
     console.log(`ui server: ${s ? `${UI} (device ${s.connected ? 'connected' : 'not connected'}, firmware ${s.firmware ?? '?'})` : 'not running'}`);
     console.log(`images:    ${images().join(', ') || 'none (ppemu setup)'}`);
     console.log(`host:      ${process.arch}${SLOW ? ' (device runs under qemu-user: slow)' : ''}`);
+    if (c?.running) {
+      const ip = docker(['exec', CONTAINER, 'sh', '-c', "ip -4 -o addr show wlan0 | awk '{print $4}'; ip route | awk '/^default/ {print $3}'"], { capture: true }).stdout.trim().split('\n');
+      console.log(`network:   device wlan0 ${ip[0] || '?'}; from the device, this host is ${ip[1] || '?'}`);
+    }
   },
   open() { sh(process.platform === 'darwin' ? 'open' : 'xdg-open', [UI]); },
   versions() {
@@ -331,6 +368,7 @@ const commands = {
       else sed -i '/^\[General\]$/a SetupState=Intro' "$conf"; fi
       [ -f /data/unboxed ] || date > /data/unboxed
       printf '[General]\nSetup=false\n' > /data/xochitl.conf
+      systemctl reset-failed xochitl
       systemctl start xochitl`;
     if (docker(['exec', CONTAINER, 'sh', '-c', script]).status) die('could not update device settings');
     await waitFor(async () => (await status()).connected, T(20000, 120000));
@@ -346,17 +384,32 @@ const commands = {
     if (!containerState()?.running) die('emulator is not running (ppemu start)');
     process.exit(sh('ssh', [...sshArgs, ...(pos.length ? [] : ['-t']), 'root@127.0.0.1', ...pos]).status ?? 1);
   },
-  push() {
+  // Through the device's own shell (tar), like docker cp: docker cp can't
+  // see the device's mounts (/tmp, the /etc overlay) and refuses a read-only root.
+  async push() {
     if (pos.length !== 2) die('push LOCAL REMOTE');
-    process.exit(docker(['cp', pos[0], `${CONTAINER}:${pos[1]}`]).status ?? 1);
+    const [local, remote] = pos;
+    if (!fs.existsSync(local)) die(`no such file: ${local}`);
+    const dir = fs.statSync(local).isDirectory();
+    const script = dir ? 'd=$1; [ -d "$d" ] && d="$d/$2"; mkdir -p "$d" && tar -xf - -C "$d"' : 'd=$1; [ -d "$d" ] && d="$d/$2"; cat > "$d"';
+    process.exit(await pipe(dir ? ['tar', '-C', local, '-cf', '-', '.'] : ['cat', local],
+      ['docker', 'exec', '-i', CONTAINER, 'sh', '-c', script, 'sh', remote, path.basename(path.resolve(local))]));
   },
-  pull() {
+  async pull() {
     if (pos.length !== 2) die('pull REMOTE LOCAL');
-    process.exit(docker(['cp', `${CONTAINER}:${pos[0]}`, pos[1]]).status ?? 1);
+    const [remote, local] = pos;
+    const dir = !docker(['exec', CONTAINER, 'test', '-d', remote], { capture: true }).status;
+    if (!dir && docker(['exec', CONTAINER, 'test', '-f', remote], { capture: true }).status) die(`no such file on the device: ${remote}`);
+    const dest = fs.existsSync(local) && fs.statSync(local).isDirectory() ? path.join(local, path.basename(remote)) : local;
+    if (dir) fs.mkdirSync(dest, { recursive: true });
+    process.exit(await pipe(['docker', 'exec', CONTAINER, ...(dir ? ['tar', '-C', remote, '-cf', '-', '.'] : ['cat', remote])],
+      dir ? ['tar', '-xf', '-', '-C', dest] : ['sh', '-c', 'cat > "$1"', 'sh', dest]));
   },
   async restart() {
     // Captured: with tracing on, the shim in this shell would chatter too.
-    const r = docker(['exec', CONTAINER, 'sh', '-c', `${flags.debug ? 'touch' : 'rm -f'} /run/rmemu-debug; systemctl restart xochitl`], { capture: true });
+    // reset-failed first: a dev loop restarts often, and the stock start limit
+    // (4 in 10 min, then emergency.target reboots) is not what is being tested.
+    const r = docker(['exec', CONTAINER, 'sh', '-c', `${flags.debug ? 'touch' : 'rm -f'} /run/rmemu-debug; systemctl reset-failed xochitl; systemctl restart xochitl`], { capture: true });
     if (r.status) die(`restart failed: ${r.stderr.trim() || 'is the emulator running? (ppemu status)'}`);
     // Until the new xochitl has drawn its UI: before that, screenshots show the
     // old frame and input goes nowhere (about a minute under qemu-user).

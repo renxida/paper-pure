@@ -19,13 +19,14 @@
 
 int rmemu_debug;
 static const char *fakeroot = "/opt/rmemu/root";
-// PID 1 is systemd, which needs none of this (the fake tree is also
-// bind-mounted at the real /sys paths) and aborts when realpath() hands it
-// back a path outside /sys. Leave it alone.
-static int pid1;
+// systemd itself (PID 1, and its systemd-* daemons) needs none of this: the
+// fake tree is also bind-mounted at the real /sys paths. Faking for them
+// breaks them: PID 1 aborts when realpath() answers outside /sys, logind
+// crashes on a fake device monitor. Leave them alone.
+int rmemu_off;
 
 static int hw_path(const char *p) {
-    return !pid1 && p && (!strncmp(p, "/dev/", 5) || !strncmp(p, "/sys/", 5) || !strncmp(p, "/proc/device-tree", 17));
+    return !rmemu_off && p && (!strncmp(p, "/dev/", 5) || !strncmp(p, "/sys/", 5) || !strncmp(p, "/proc/device-tree", 17));
 }
 
 // Redirect hardware paths into the fake tree when a fake file exists there.
@@ -275,7 +276,7 @@ void *dlopen(const char *file, int mode) {
 }
 
 __attribute__((constructor)) static void init(void) {
-    if (getpid() == 1) { pid1 = 1; return; }
+    if (getpid() == 1 || !strncmp(program_invocation_short_name, "systemd", 7)) { rmemu_off = 1; return; }
     const char *d = getenv("RMEMU_DEBUG");
     rmemu_debug = (d && strcmp(d, "0")) || access("/run/rmemu-debug", F_OK) == 0;
     if (getenv("RMEMU_FAKEROOT")) fakeroot = getenv("RMEMU_FAKEROOT");

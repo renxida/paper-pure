@@ -96,6 +96,18 @@ done
 mkdir -p /run/systemd/system/xochitl.service.d
 grep -v 'dev-dri-card0' /usr/lib/systemd/system/xochitl.service.d/xochitl-service-override.conf \
     > /run/systemd/system/xochitl.service.d/xochitl-service-override.conf
+# Under qemu-user (x86 hosts) xochitl's main thread can be busy for over a
+# minute building a page, past the stock 60 s watchdog, and the start limit
+# then reboots the "tablet". 10 minutes there; natively it stays stock.
+if tr '\0' ' ' < /proc/1/cmdline | grep -q qemu; then
+    printf '[Service]\nWatchdogSec=10min\n' > /run/systemd/system/xochitl.service.d/zz-rmemu-qemu.conf
+fi
+# Unit credentials need a mount this container can't make ("Failed to set up
+# credentials: Invalid argument"); none are passed on the tablet either.
+for f in $(grep -lE '^(Import|Load)Credential=' /usr/lib/systemd/system/*.service); do
+    d=/run/systemd/system/${f##*/}.d
+    mkdir -p "$d" && printf '[Service]\nImportCredential=\nLoadCredential=\n' > "$d/rmemu-credentials.conf"
+done
 mkdir -p /run/systemd/resolved.conf.d /run/systemd/journald.conf.d
 printf '[Resolve]\nDNS=%s\n' "$dns" > /run/systemd/resolved.conf.d/rmemu.conf
 # The journal also goes to the console, which is `docker logs` (ppemu logs).
