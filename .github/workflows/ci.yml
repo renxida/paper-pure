@@ -1,0 +1,197 @@
+# The guardrail from docs/desiderata.md: nothing merges, and nothing is
+# released, unless the rungs pass. Same targets as on a laptop (Makefile);
+# docs/ci.md says what runs where and what Cedar has to switch on.
+name: ci
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A new push to a PR cancels its older run; pushes never cancel each other.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  rung1:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: agent/go.mod
+          cache: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+      - name: Host tools (shellcheck, Qt's rcc for apps/)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends shellcheck qt6-base-dev-tools
+      - run: make rung1
+      - if: always()
+        run: f=out/logs/rung1/summary; [ ! -f $f ] || { echo '```'; cat $f; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rung1-logs
+          path: out/logs/rung1/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # Cheapest first: the arm64 jobs start only once rung1 is green.
+  # Component proofs in arm64 containers. Native arm64: no qemu.
+  proofs:
+    needs: rung1
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: agent/go.mod
+          cache: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+      - name: Docker and disk
+        run: |
+          docker version --format 'docker {{.Server.Version}} {{.Server.Os}}/{{.Server.Arch}}'
+          docker buildx version
+          docker compose version
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h /
+      - uses: ./.github/actions/firmware
+      - run: make proofs
+      - if: always()
+        run: f=out/logs/proofs/summary; [ ! -f $f ] || { echo '```'; cat $f; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: proofs-logs
+          path: out/logs/proofs/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # The full-OS emulator: the Pure's own 3.27.2.2 userland plus our stack.
+  rung2:
+    needs: rung1
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    env:
+      PP_E2E_OUT: test/e2e/out
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: agent/go.mod
+          cache: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+      - name: Docker and disk
+        run: |
+          docker version --format 'docker {{.Server.Version}} {{.Server.Os}}/{{.Server.Arch}}'
+          docker buildx version
+          docker compose version
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h /
+      - uses: ./.github/actions/firmware
+      # mods/build.sh's ABI check reads ELF headers.
+      - run: command -v readelf > /dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq binutils; }
+      - run: make rung2
+      # Logs always; screenshots of reMarkable's UI only when something failed.
+      - if: success()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rung2-logs
+          path: |
+            ${{ env.PP_E2E_OUT }}/
+            !${{ env.PP_E2E_OUT }}/**/*.png
+            !${{ env.PP_E2E_OUT }}/**/*.jpg
+          retention-days: 7
+          if-no-files-found: ignore
+      - if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rung2-logs-and-screenshots
+          path: ${{ env.PP_E2E_OUT }}/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # Only main, only after every rung passed. Secrets live in the `release`
+  # environment, so Cedar can add a required reviewer there.
+  release:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [rung1, proofs, rung2]
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    environment: release
+    concurrency:
+      group: release
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: agent/go.mod
+          cache: false
+      # The stock rootfs, so mods/build.sh's ABI check runs instead of skipping.
+      - uses: ./.github/actions/firmware
+      - run: command -v readelf > /dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq binutils; }
+      - name: Build and sign
+        env:
+          SIGNING_KEY: ${{ secrets.PP_SIGNING_KEY }}
+        run: |
+          if [ -n "$SIGNING_KEY" ]; then
+            (umask 077; printf '%s\n' "$SIGNING_KEY" > "$RUNNER_TEMP/release.key.pem")
+            export PP_SIGNING_KEY="$RUNNER_TEMP/release.key.pem"
+          else
+            echo "::notice title=Release not signed::PP_SIGNING_KEY is not set in the release environment. Built and pack-tested only; nothing is published."
+          fi
+          make release
+      - name: Publish
+        env:
+          PP_FEED_URL: ${{ secrets.PP_FEED_URL }}
+          PP_PUBLISH_TOKEN: ${{ secrets.PP_PUBLISH_TOKEN }}
+          PP_CF_ACCESS_CLIENT_ID: ${{ secrets.PP_CF_ACCESS_CLIENT_ID }}
+          PP_CF_ACCESS_CLIENT_SECRET: ${{ secrets.PP_CF_ACCESS_CLIENT_SECRET }}
+        run: |
+          have=() miss=()
+          for v in PP_FEED_URL PP_PUBLISH_TOKEN PP_CF_ACCESS_CLIENT_ID PP_CF_ACCESS_CLIENT_SECRET; do
+            if [ -n "${!v}" ]; then have+=("$v"); else miss+=("$v"); fi
+          done
+          if [ ! -f out/feed/release-id ]; then
+            echo "::notice title=Not published::No signed release (no PP_SIGNING_KEY)."
+          elif [ ${#have[@]} = 0 ]; then
+            echo "::notice title=Not published::No feed secrets in the release environment (${miss[*]})."
+          elif [ ${#miss[@]} != 0 ]; then
+            echo "::error title=Feed secrets incomplete::Set all four or none. Missing: ${miss[*]}"
+            exit 1
+          else
+            make publish
+          fi
+      - if: always()
+        run: |
+          rm -f "$RUNNER_TEMP/release.key.pem"
+          for f in out/logs/release/summary out/feed/latest.json; do
+            [ ! -f $f ] || { echo '```'; cat $f; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          done

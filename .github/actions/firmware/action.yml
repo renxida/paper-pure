@@ -1,0 +1,28 @@
+name: firmware
+description: >
+  reMarkable's .swu for the OS we are frozen on, into emu/firmware/. From the
+  actions cache (keyed by its pinned sha256) or, on a miss, from reMarkable's
+  public mirror. Checked against the pin either way. Never uploaded as an
+  artifact: it is reMarkable's, we don't redistribute it.
+runs:
+  using: composite
+  steps:
+    - id: fw
+      shell: bash
+      run: make -s firmware-info >> "$GITHUB_OUTPUT"
+    - id: cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: emu/firmware/${{ steps.fw.outputs.name }}
+        key: tatsu-swu-${{ steps.fw.outputs.sha256 }}
+    - shell: bash
+      run: make firmware
+    # Saved right away, so a failing test later in the job still caches it.
+    - if: steps.cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: emu/firmware/${{ steps.fw.outputs.name }}
+        key: tatsu-swu-${{ steps.fw.outputs.sha256 }}
+    # emu/tools/import-rootfs.sh unpacks the .swu with cpio.
+    - shell: bash
+      run: command -v cpio > /dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq cpio; }
