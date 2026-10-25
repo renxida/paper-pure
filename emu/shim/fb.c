@@ -32,11 +32,9 @@ static long screen_bpl;
 static int screen_fmt, screen_bpp;
 static unsigned char *shadow;   // raw bytes rmemud last got (W * bpp per row)
 static volatile int poke;       // set on display activity; makes the scanner look now
-// The screen memory is SWTCON's and goes away when xochitl exits. The scanner
-// only reads it under this lock, and stops once the QImage around it is gone
-// (reading unmapped memory there made xochitl segfault on about one stop in three).
+// The screen memory is SWTCON's and is freed when xochitl exits. The scanner
+// only reads it under this lock (see free() below).
 static pthread_mutex_t screen_lock = PTHREAD_MUTEX_INITIALIZER;
-static const void *screen_img;  // the QImage object wrapping it
 
 // QImage::Format values (Qt 6) we know how to read.
 enum { F_RGB32 = 4, F_ARGB32 = 5, F_ARGB32P = 6, F_RGB16 = 7, F_RGBX8888 = 16, F_RGBA8888 = 17,
@@ -174,10 +172,10 @@ static void *scanner(void *arg) {
 
 static void on_flip(void) { poke = 1; }
 
-static void found_screen(const void *img, const void *data, long bpl, int fmt) {
+static void found_screen(const void *data, long bpl, int fmt) {
     if (!shadow) shadow = calloc((size_t)W * H, 4);
     pthread_mutex_lock(&screen_lock);
-    screen_fmt = fmt; screen_bpp = fmt_bpp(fmt); screen_bpl = bpl; screen = data; screen_img = img;
+    screen_fmt = fmt; screen_bpp = fmt_bpp(fmt); screen_bpl = bpl; screen = data;
     pthread_mutex_unlock(&screen_lock);
     LOG("fb: captured screen buffer %p (%dx%d bpl %ld format %d)", data, W, H, bpl, fmt);
     static int started;
@@ -199,28 +197,21 @@ void _ZN6QImageC1EPhiixNS_6FormatEPFvPvES2_(void *self, unsigned char *data, int
     if (w >= 1000 && h >= 1000) TRACE("fb: QImage(data) %dx%d bpl=%lld fmt=%d", w, h, bpl, fmt);
     static int pick = -1;
     if (pick < 0) pick = getenv("RMEMU_FB_FORMAT") ? atoi(getenv("RMEMU_FB_FORMAT")) : 4;
-    if (w == W && h == H && fmt_bpp(fmt) && (!pick || fmt == pick)) found_screen(self, data, (long)bpl, fmt);
+    if (w == W && h == H && fmt_bpp(fmt) && (!pick || fmt == pick)) found_screen(data, (long)bpl, fmt);
 }
 
-// QImage::~QImage(): when the screen's QImage goes, stop reading its memory.
-static void screen_image_gone(void *self) {
-    if (!self || self != screen_img) return;
-    pthread_mutex_lock(&screen_lock);
-    screen = NULL; screen_img = NULL;
-    pthread_mutex_unlock(&screen_lock);
-    TRACE("fb: screen image destroyed, scanner stops");
-}
-void _ZN6QImageD1Ev(void *self) {
-    static void (*real)(void *);
-    if (!real) real = dlsym(RTLD_NEXT, "_ZN6QImageD1Ev");
-    screen_image_gone(self);
-    real(self);
-}
-void _ZN6QImageD2Ev(void *self) {
-    static void (*real)(void *);
-    if (!real) real = dlsym(RTLD_NEXT, "_ZN6QImageD2Ev");
-    screen_image_gone(self);
-    real(self);
+// SWTCON mallocs the screen buffer and frees it when xochitl exits. Let the
+// scanner go first, or it reads freed memory and xochitl segfaults on stop
+// (about one stop in three under qemu; then OnFailure= reboots the "tablet").
+extern void __libc_free(void *);
+void free(void *p) {
+    if (p && p == screen) {
+        pthread_mutex_lock(&screen_lock);
+        if (p == screen) screen = NULL;
+        pthread_mutex_unlock(&screen_lock);
+        TRACE("fb: screen buffer freed, scanner lets go");
+    }
+    __libc_free(p);
 }
 
 void fb_init(void) {}

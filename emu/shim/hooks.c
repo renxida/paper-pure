@@ -290,14 +290,14 @@ static void on_crash(int sig, siginfo_t *si, void *ucp) {
         snprintf(line[i], sizeof line[i], "%p %s(%s+%#lx)", at[i], d.dli_fname ? d.dli_fname : "?", d.dli_sname ? d.dli_sname : "?",
                  (unsigned long)((char *)at[i] - (char *)(d.dli_saddr ? d.dli_saddr : d.dli_fbase)));
     }
-    LOG("%s: signal %d (addr %p) in thread %ld at %s, called from %s", program_invocation_short_name, sig, si->si_addr,
+    LOG("signal %d (addr %p) in thread %ld at %s, called from %s", sig, si->si_addr,
         (long)syscall(SYS_gettid), line[0], line[1]);
     signal(sig, SIG_DFL);
 }
 
 __attribute__((constructor)) static void init(void) {
-    if (getpid() == 1 || !strncmp(program_invocation_short_name, "systemd", 7) ||
-        !strcmp(program_invocation_short_name, "rmemud")) { rmemu_off = 1; return; }
+    const char *me = program_invocation_short_name ? program_invocation_short_name : "";
+    if (getpid() == 1 || !strncmp(me, "systemd", 7) || !strcmp(me, "rmemud")) { rmemu_off = 1; return; }
     const char *d = getenv("RMEMU_DEBUG");
     rmemu_debug = (d && strcmp(d, "0")) || access("/run/rmemu-debug", F_OK) == 0;
     if (getenv("RMEMU_FAKEROOT")) fakeroot = getenv("RMEMU_FAKEROOT");

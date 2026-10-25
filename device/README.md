@@ -80,7 +80,7 @@ Nothing here touches xochitl, its unit, the pen or display stack. We stop update
 
 ### Verified: kill switch and crash loops (Oct 25, 2026, second pass)
 
-`PP_NAME=pp-killswitch-it PP_PORT=3194 device/test/run.sh <extracted 3.27.2.2 rootfs>`: **84 passed, 0 failed**, about 35 minutes (scenarios 1 to 7 as below, plus 9). Scenario 9 is the real arm64 `pp-agent` under the test bed's systemd 255, with `mods/release/hooks/*.sh` as shipped and upstream's `xovi/start` and `xovi/stock` at the pinned commit (stub hashtab, no `xovi.so`; the stand-in xochitl crashes when it runs with xovi preloaded and the live tree says so). The power key is a FIFO the agent reads; the test writes `struct input_event` records into it.
+`PP_NAME=pp-killswitch-it PP_PORT=3194 device/test/run.sh <extracted 3.27.2.2 rootfs>`: **84 passed, 0 failed**, 27 minutes, on the final files (scenarios 1 to 7 as below, plus 9; it leaves no container or volume behind). Scenario 9 is the real arm64 `pp-agent` under the test bed's systemd 255, with `mods/release/hooks/*.sh` as shipped and upstream's `xovi/start` and `xovi/stock` at the pinned commit (stub hashtab, no `xovi.so`; the stand-in xochitl crashes when it runs with xovi preloaded and the live tree says so). The power key is a FIFO the agent reads; the test writes `struct input_event` records into it.
 
 - **6.** `pp-agent-tripletap` runs from the persisted unit and started after `rm-sanity` exited (monotonic timestamps: 5 s after). `--verify` reports it, and the two `wait-sanity` drop-ins.
 - **7.** After `--uninstall`, `pp-agent-tripletap` is no longer enabled.
@@ -95,7 +95,7 @@ Nothing here touches xochitl, its unit, the pen or display stack. We stop update
 - `device/install.sh --agent` runs `agent/install.sh` with plain `sh` and no `install(1)` shim (`shim/` is gone).
 - A race seen once (run 3 of 4): the test bed answered SSH while systemd was still `initializing`, `install` ran before the stock `/etc` overlay and `/etc/dropbear` bind were up, and SSH stayed dead until a forced reboot (scenarios 2 and 3 failed, the rest passed). Fixed in `pp-device.sh` (waits out early boot) and in `run.sh`'s `boot` (waits for it too). The same race is possible on the tablet right after a reboot.
 - Flake seen once: under qemu load dropbear missed ssh's 10 s banner timeout (`Connection timed out during banner exchange`), which killed a run with exit 255. `run.sh`'s `dev` and `install.sh`'s fresh-connection check now retry that.
-- Logs and the agent's own log of these runs: scratch `work-pp-killswitch/tb2/` (not in the repo).
+- Logs of the final run: scratch `work-pp-killswitch/tb4/` (not in the repo).
 
 ### Verified (Oct 25, 2026, x86_64 dev container, qemu-user for arm64)
 
