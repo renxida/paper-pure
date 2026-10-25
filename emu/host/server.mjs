@@ -97,7 +97,7 @@ async function handleCommand(sock, text) {
   let msg;
   try { msg = JSON.parse(text); } catch { return; }
   if (msg.cmd === 'gesture') await play(device, msg.gesture).catch(() => {});
-  if (msg.cmd === 'restart') await docker(['exec', CONTAINER, 'systemctl', 'restart', 'xochitl']);
+  if (msg.cmd === 'restart') await docker(['exec', CONTAINER, 'sh', '-c', 'systemctl reset-failed xochitl; systemctl restart xochitl']);
 }
 
 device.on('rect', (msg) => { for (const c of clients) wsSend(c, msg); });
@@ -142,7 +142,7 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, await device.waitIdle(q('idle', 400), q('timeout', 10000), q('min', 0)));
     }
     if (url.pathname === '/api/xochitl/restart' && req.method === 'POST') {
-      const r = await docker(['exec', CONTAINER, 'systemctl', 'restart', 'xochitl']);
+      const r = await docker(['exec', CONTAINER, 'sh', '-c', 'systemctl reset-failed xochitl; systemctl restart xochitl']);
       return json(res, r.ok ? 200 : 500, r);
     }
     if (url.pathname === '/api/logs') {

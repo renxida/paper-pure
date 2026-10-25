@@ -116,7 +116,8 @@ Additions in `shim/`, the first two for qemu-user:
 - **Busy main thread counts as activity.** Under qemu xochitl can compute for 10 to 60 s before it draws a new page (boot, Settings). The shim times how long xochitl's main thread has been out of `poll`/`ppoll` and the display scanner reports that as activity, so "wait until the screen settles" doesn't return halfway. Natively this just makes waits a little more honest.
 - **freopen.** busybox `hexdump` opens files with `freopen`, which upstream didn't hook, so `hexdump /proc/device-tree/...` saw nothing. Now the device shell sees the same fake tree as xochitl.
 - **Hands off systemd** (`hooks.c`): no fakes in PID 1, `systemd-*` and rmemud.
-- **Screen capture stops when the screen goes** (`fb.c`): the scanner thread read SWTCON's buffer after xochitl freed it at exit, and xochitl segfaulted on about one stop in three. Upstream has the same race; without systemd nobody saw it. Under systemd each one was a failure and `OnFailure=emergency.target` rebooted.
+- **Screen capture lets go before the free** (`fb.c`): the scanner thread kept reading SWTCON's screen buffer after xochitl freed it on exit, and xochitl segfaulted on many stops (3 of 4 pp-agent install/rollback restarts here). Upstream has the same race; with a shell loop nobody saw it. Under systemd each one is a failure, and `OnFailure=emergency.target` rebooted the "tablet". The shim now hooks `free()` for that one buffer.
+- **Crashes say where** (`hooks.c`): a SIGSEGV/SIGBUS in a shimmed process logs the faulting code and its caller as `library(symbol+offset)` before the default action. That is how the race above was found.
 
 Internal names (`/opt/rmemu`, `/run/rmemu`, `RMEMU_*`, `rmemud`) stay as upstream so their fixes still apply cleanly.
 
