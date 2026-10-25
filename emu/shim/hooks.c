@@ -276,6 +276,25 @@ void *dlopen(const char *file, int mode) {
     return h;
 }
 
+// A crash says where: the faulting code and its caller, as library+symbol.
+// Then the default action runs (systemd still sees the signal). Programs that
+// install their own handler later replace this one.
+#include <ucontext.h>
+static void on_crash(int sig, siginfo_t *si, void *ucp) {
+    ucontext_t *uc = ucp;
+    void *at[2] = { (void *)uc->uc_mcontext.pc, (void *)uc->uc_mcontext.regs[30] };
+    char line[2][256];
+    for (int i = 0; i < 2; i++) {
+        Dl_info d = { 0 };
+        dladdr(at[i], &d);
+        snprintf(line[i], sizeof line[i], "%p %s(%s+%#lx)", at[i], d.dli_fname ? d.dli_fname : "?", d.dli_sname ? d.dli_sname : "?",
+                 (unsigned long)((char *)at[i] - (char *)(d.dli_saddr ? d.dli_saddr : d.dli_fbase)));
+    }
+    LOG("%s: signal %d (addr %p) in thread %ld at %s, called from %s", program_invocation_short_name, sig, si->si_addr,
+        (long)syscall(SYS_gettid), line[0], line[1]);
+    signal(sig, SIG_DFL);
+}
+
 __attribute__((constructor)) static void init(void) {
     if (getpid() == 1 || !strncmp(program_invocation_short_name, "systemd", 7) ||
         !strcmp(program_invocation_short_name, "rmemud")) { rmemu_off = 1; return; }
@@ -286,5 +305,8 @@ __attribute__((constructor)) static void init(void) {
     setenv("XOCHITL_DIGITIZER_PATH", "/dev/input/event1", 0);
     // Only xochitl gets the full treatment; child processes just inherit path fakes.
     TRACE("loaded into pid %d", getpid());
+    struct sigaction sa = { .sa_sigaction = on_crash, .sa_flags = SA_SIGINFO | SA_RESETHAND };
+    sigaction(SIGSEGV, &sa, NULL);
+    sigaction(SIGBUS, &sa, NULL);
     fb_init();
 }

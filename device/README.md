@@ -47,6 +47,7 @@ Not used: an `AutoUpdate` key exists in xochitl's settings code, but the Updates
 - `/etc` is an overlay with a tmpfs upper (`var-volatile-etc.service`). A plain write to `/etc` is gone at reboot.
 - `pp-device.sh` writes both views. Live, through the overlay, so it works now. And in the real root fs, through a non-recursive bind mount of `/` (`mount --bind / /run/pp-device/root` shows the ext4 under the overlay), with `/` remounted read-write for the write and read-only right after. This is remagic's `persist_local_to_rootfs` trick. It does not `umount -R /etc` (rmfakecloud-proxy's and xovi-tripletap's way), which also drops the bind mount holding dropbear's host key and breaks new SSH connections until a reboot.
 - **Files in the root fs are rewritten in place, never replaced.** Replacing (`mv`, `sed -i`) unlinks the old inode while the `/etc` overlay still holds it, and then `mount -o remount,ro /` fails with EBUSY until the next reboot. Found in the test bed, and reproduced on purpose with `sed -i`.
+- **Not during early boot.** `pp-device.sh` waits until systemd is past `initializing` (basic.target). Before that the `/etc` overlay and the `/etc/dropbear` bind may not be up yet, a write lands in the wrong layer, and SSH can die until the next reboot. Seen once in the test bed (below).
 - It survives reboots. It does not survive a slot switch: an OTA or the boot ROM's fallback boots the *other* root partition, which has none of this. `verify` prints which OS that slot holds.
 
 ## Never brick
@@ -92,6 +93,7 @@ Nothing here touches xochitl, its unit, the pen or display stack. We stop update
 - **9h. The `disable` file:** with it, 3 presses turn mods off, 3 more say "mods already off"; `pp-agent.service` is skipped (`ConditionResult=no`).
 - `systemd-analyze verify --root=<copy of the tatsu systemd tree>` on the four agent units with both `wait-sanity.conf` drop-ins: no output, exit 0 (host systemd 255). A typo'd copy is reported.
 - `device/install.sh --agent` runs `agent/install.sh` with plain `sh` and no `install(1)` shim (`shim/` is gone).
+- A race seen once (run 3 of 4): the test bed answered SSH while systemd was still `initializing`, `install` ran before the stock `/etc` overlay and `/etc/dropbear` bind were up, and SSH stayed dead until a forced reboot (scenarios 2 and 3 failed, the rest passed). Fixed in `pp-device.sh` (waits out early boot) and in `run.sh`'s `boot` (waits for it too). The same race is possible on the tablet right after a reboot.
 - Flake seen once: under qemu load dropbear missed ssh's 10 s banner timeout (`Connection timed out during banner exchange`), which killed a run with exit 255. `run.sh`'s `dev` and `install.sh`'s fresh-connection check now retry that.
 - Logs and the agent's own log of these runs: scratch `work-pp-killswitch/tb2/` (not in the repo).
 

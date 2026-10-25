@@ -424,8 +424,22 @@ cmd_uninstall() {
     info "the Updates switch in Settings works again after the next reboot."
 }
 
+# Before basic.target the stock /etc overlay and the /etc/dropbear bind may
+# not be up yet; writing then lands in the wrong layer (and can cost SSH).
+wait_booted() {
+    have_systemd || return 0
+    local s=""
+    for _ in $(seq 1 60); do
+        s=$(systemctl is-system-running 2> /dev/null || true)
+        [ "$s" = initializing ] || return 0
+        sleep 2
+    done
+    die "the tablet is still booting (systemd: $s); try again in a minute"
+}
+
 main() {
     [ "$(id -u)" = 0 ] || die "run as root"
+    wait_booted
     mkdir -p "$DEV" /run/pp-device
     exec 9> /run/pp-device/lock
     flock -n 9 || die "another pp-device is running"

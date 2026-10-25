@@ -91,7 +91,9 @@ boot() { # start the container and wait for systemd to settle and SSH to answer
     # Ready = xochitl is up. (On a stock test bed systemd stays "starting":
     # memfaultd can't run in a container and keeps restarting, and swupdate
     # waits for it. On the tablet memfaultd runs.)
-    until st=$(docker exec "$C" systemctl is-system-running 2> /dev/null; true); [ "$(docker exec "$C" systemctl is-active xochitl.service 2> /dev/null)" = active ]; do
+    # Also past "initializing" (basic.target): before it the /etc overlay
+    # and the /etc/dropbear bind may not be up, and an install then breaks SSH.
+    until st=$(docker exec "$C" systemctl is-system-running 2> /dev/null; true); [ "$st" != initializing ] && [ "$(docker exec "$C" systemctl is-active xochitl.service 2> /dev/null)" = active ]; do
         [ $(($(date +%s) - start)) -lt 400 ] || { echo "  boot: xochitl not up after 400 s (systemd: $st)"; return 1; }
         running || { echo "  boot: container stopped"; return 1; }
         sleep 3
