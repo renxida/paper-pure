@@ -111,7 +111,8 @@ What happened and what changed:
 
 Results:
 
-- On GitHub, runs 19 (`440bb5a`, the fix) and 20 (`21ee294`, docs) passed end to end, as user `runner` on native arm64. The device test bed took 687 s in run 19.
+- On GitHub, runs 19 (`440bb5a`, the fix), 20, 21 and 22 passed end to end, as user `runner` on native arm64. The device test bed took 687 s in run 19.
+- Run 23 had the same tree as 21 and 22 and failed once in 9f, an older timing flake also seen in run 11. The outcome checks passed: `tb3` failed, `tb1` committed, nothing pending, no slot switch. Only the check of who did the rollback failed. pp-agent saw the crash and rolled `tb3` back itself, and the OS rebooted anyway because the start limit was already used up, so pp-agent boot had nothing to roll back. 9f now accepts either one and prints which.
 - In the dev container (root, qemu, cgroup v1), `PP_NAME=pp-fix-tb device/test/run.sh` gave **108 passed, 0 failed** in 46 min, with no container or volume left behind (98 before the new scenarios).
 - The mechanism of the dropped session, shown in a plain tatsu container (`pp-device.sh install | head -n 2`):
   - The old script ends at its third line with `pipeline rc=141`.

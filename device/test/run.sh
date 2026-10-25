@@ -517,12 +517,24 @@ done
 if running; then
     path="pp-agent rolled back before the start limit"
 else
-    path="the OS rebooted (rm-emergency), then pp-agent boot rolled back"
     echo "  test bed rebooted by itself after $(($(date +%s) - start9)) s"
     boot
     check "9f. after the emergency reboot, pp-agent boot ran" agent_booted
     test_up
-    check "9f. pp-agent boot rolled tb3 back" dev 'journalctl -b -u pp-agent-boot.service --no-pager | grep -q "rolling back tb3"'
+    # Who rolled back: pp-agent boot, because the reboot cut pp-agent's check
+    # short and left Pending set; or pp-agent itself, which saw the crash
+    # and finished its rollback, with the start limit already used up, so
+    # the OS rebooted anyway (seen on GitHub, run 23). Both are fine.
+    if dev 'journalctl -b -u pp-agent-boot.service --no-pager | grep -q "rolling back tb3"'; then
+        path="the OS rebooted (rm-emergency), then pp-agent boot rolled back"
+    else
+        path="pp-agent rolled back, and the OS rebooted anyway (rm-emergency)"
+    fi
+    rb=$(dev /home/root/paper-pure/bin/pp-agent status | python3 -I -c 'import json,sys
+e = [x for x in json.load(sys.stdin).get("events") or [] if x.get("kind") == "rollback" and x.get("id") == "tb3"]
+print(e[-1].get("msg", "") if e else "")') || rb=""
+    echo "  tb3's rollback: ${rb:-none recorded}"
+    check "9f. tb3's rollback is recorded (by pp-agent before the reboot, or by pp-agent boot after it)" [ -n "$rb" ]
 fi
 echo "  path: $path"
 check "9f. tb3 marked failed, tb1 committed, nothing pending" [ "$(pst committed) $(pst failed) $(pst pending)" = 'tb1 ["tb2", "tb3"] ' ]
