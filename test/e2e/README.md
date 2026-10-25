@@ -47,6 +47,8 @@ Each step runs under a time limit (`timeout`, whole process group); see `STEPS` 
 
 - **Wi-Fi as xochitl sees it.** xochitl's csl wifi library asks wpa_supplicant (D-Bus) and networkd's `OnlineState`. With both masked, xochitl said "Pairing with the cloud requires a Wi-Fi connection" and rm-sync never ran. `emu/daemon/rmemu-wifi.c` now answers both (one open network, `pp-emu`, connected while `wlan0` has the default route). See `emu/README.md`.
 - The real wpa_supplicant's `wired` driver gets to `completed` on the veth (once `allmulti` is set), but its `SignalPoll` fails and the library reads that as disconnected; networkd can't start under qemu-user ("Could not set up manager: Protocol not supported") and lacks `CAP_NET_ADMIN`. So: a fake, not the real daemons.
+- **PDFs crashed xochitl.** Once the PDF from the server had synced down, xochitl segfaulted in the shim every time it rendered the page (5 times in 15 minutes, then the stock start limit rebooted the "tablet", and every boot after that crash-looped the same way). The shim took the PDF page's pdfium bitmap, wrapped as a full-screen QImage, for the screen, then read it after it was freed. Screenshots went blank first. Fixed in `emu/shim/fb.c`: only a full-screen image with no cleanup function, in xochitl itself, is the screen.
+- On the way, `device/tablet/pp-device.sh --verify` learned that systemd-resolved answers a `0.0.0.0` hosts line with "no address" (see `device/README.md`).
 
 ## Status
 

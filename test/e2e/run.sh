@@ -88,6 +88,7 @@ xovi_maps() { # how many of xochitl's mappings are xovi.so ("none" if xochitl is
 xovi_on() { local n; n=$(xovi_maps); [ -n "$n" ] && [ "$n" != none ] && [ "$n" -gt 0 ]; }
 xovi_off() { [ "$(xovi_maps)" = 0 ]; }
 live_is() { [ "$(agent | jget live)" = "$1" ]; }
+result_is() { [ "$(agent | jget last_result)" = "$1" ]; }
 emu_up() { # a step after a failed one may find the "tablet" rebooted (container stopped)
     if [ "$(docker inspect -f '{{.State.Running}}' pp-emu-tablet 2>/dev/null)" != true ]; then
         log "emulator not running; starting it"
@@ -124,16 +125,16 @@ updates_switch_off() { # Settings > General > Software, the Updates switch (devi
     log "Updates switch pixels: $v (255 = off, 0 = on)"
     [ "$v" = "255 255" ]
 }
+host_rcc() { command -v rcc || { [ -x /usr/lib/qt6/libexec/rcc ] && echo /usr/lib/qt6/libexec/rcc; } || true; }
 build_hello() { # release-id dir: the hello app with this release id baked in
     local rcc
-    rcc=$(command -v rcc || true)
-    [ -n "$rcc" ] || [ ! -x /usr/lib/qt6/libexec/rcc ] || rcc=/usr/lib/qt6/libexec/rcc
+    rcc=$(host_rcc)
     if [ -n "$rcc" ]; then
         RELEASE_ID=$1 RCC=$rcc "$REPO/apps/hello/build.sh" "$2"
-    else   # no Qt on the host: the rung-1 image has rcc (apps/hello/test.sh builds it)
-        mkdir -p "$2"
-        docker run --rm -e RELEASE_ID="$1" -e RCC=/usr/lib/qt6/libexec/rcc -v "$REPO/apps/hello:/hello:ro" \
-            -v "$2:/out" --entrypoint /hello/build.sh pp-mods-host:latest /out
+    else   # no Qt on the host: the Qt stage of mods/build/Dockerfile (step_build loads it)
+        mkdir -p "$(dirname "$2")"
+        docker run --rm --platform linux/arm64 -e RELEASE_ID="$1" -e RCC=/usr/lib/qt6/libexec/rcc \
+            -v "$REPO/apps/hello:/hello:ro" -v "$(dirname "$2"):/out" pp-e2e-qt:latest /hello/build.sh "/out/$(basename "$2")"
     fi
 }
 release_tree() { # id [broken]: mods/out/release + hooks from source + hello built for this id
@@ -183,6 +184,12 @@ step_build() {
     ok "emulator image pp-emu-tatsu:$OS"
     make -s -C "$REPO/tools/wishes" venv
     ok "tools/wishes venv"
+    if [ -z "$(host_rcc)" ]; then   # no Qt here (CI runners): rcc from the mods build's own Qt stage, cached by mods/build.sh
+        local ctx
+        ctx=$(mktemp -d)
+        docker buildx build -q --platform linux/arm64 --target base --load -t pp-e2e-qt:latest -f "$REPO/mods/build/Dockerfile" "$ctx" >/dev/null
+        rmdir "$ctx"
+    fi
     build_hello probe "$W/hello-probe" >/dev/null
     ok "hello builds (rcc)"
 }
@@ -192,7 +199,10 @@ step_emulator() {
     "$PPEMU" start
     "$PPEMU" skip-setup
     shot emulator-myfiles 0.25
-    has "systemd" "$(dev 'systemctl is-system-running' || true)" "ing"   # running or degraded (swupdate fails here)
+    case $(dev 'systemctl is-system-running' || true) in   # degraded: swupdate fails at start here, until install masks it
+    running | degraded) ok "systemd up" ;;
+    *) die "systemd: $(dev 'systemctl is-system-running; systemctl --failed --no-legend' || true)" ;;
+    esac
     eq "OS" "$(dev '. /etc/os-release; echo $IMG_VERSION')" "$OS"
     eq "Wi-Fi as xochitl sees it" "$(dev 'systemctl is-active wpa_supplicant rmemu-network1 | tr "\n" " "')" "active active "
     has "networkd OnlineState" "$(dev 'busctl get-property org.freedesktop.network1 /org/freedesktop/network1 org.freedesktop.network1.Manager OnlineState')" online
@@ -221,7 +231,7 @@ step_server() {
     docker exec "$SERVER" rmfakecloud-cli setuser -u "$EMAIL" -p "$PW" -a -s 2>&1 | tail -n 1
     docker restart -t 10 "$SERVER" >/dev/null   # rmfakecloud reads users at start
     until_ok 60 "ppd up again, user $EMAIL" curl -fsS --noproxy '*' "$PPD/pp/healthz"
-    [ -n "$(web_token)" ] && ok "web login"
+    if [ -n "$(web_token)" ]; then ok "web login"; else die "web login"; fi
     if [ -f "$W/fakeaccess.pid" ]; then kill "$(cat "$W/fakeaccess.pid")" 2>/dev/null || true; fi
     setsid nohup "$W/bin/fakeaccess" -listen "${GATE#http://}" -upstream "$PPD" -id "$CFID" -secret "$CFSECRET" \
         > "$LOGS/fakeaccess.log" 2>&1 < /dev/null &
@@ -248,7 +258,7 @@ EOF
     has "device/install.sh --agent --proxy" "$(cat "$LOGS/device-install.log")" "pp-device: all checks passed"
     has "SSH after install" "$(cat "$LOGS/device-install.log")" "PASS    fresh SSH connection"
     eq "units" "$(dev 'systemctl is-active pp-proxy pp-agent-tripletap pp-agent.timer | tr "\n" " "')" "active active active "
-    has "pp-proxy check (through the gate)" "$(dev "$PP/bin/pp-proxy check" 2>&1)" "200"
+    has "pp-proxy check (through the gate)" "$(dev "$PP/bin/pp-proxy check" 2>&1)" "/pp/healthz 200 OK"
 }
 
 step_freeze() {
@@ -300,7 +310,7 @@ step_sync() {
         elif [[ $r2 == *$c* ]]; then p=${r2%%"$c"*}; tap $((200 + ${#p} * 125)) 1536
         else p=${r3%%"$c"*}; tap $((326 + ${#p} * 125)) 1660; fi
     done
-    until_ok 90 "paired: the device has a device token" dev 'grep -q "^DeviceToken=." /home/root/.config/remarkable/xochitl.conf'
+    until_ok 90 "paired: xochitl has a user token" dev 'grep -q "^UserToken=." /home/root/.config/remarkable/xochitl.conf'
     shot sync-paired
     has "rmfakecloud took the code" "$(docker logs "$SERVER" 2>&1)" "Got code $code"
     until_ok 120 "first sync through pp-proxy (GET /sync/v4/root)" dev 'journalctl -u pp-proxy --no-pager | grep -q "sync/v4/root -> 200"'
@@ -315,14 +325,19 @@ step_sync() {
     log "draw: $("$PPEMU" draw 700,1700 1200,1700)"
     shot sync-notebook
     tap 1348 56
-    local id page sha
+    local id page
     id=$(dev "grep -l '\"visibleName\": \"Notebook\"' $DOCS/*.metadata | head -n 1" | xargs -r basename | sed 's/\.metadata$//')
     [ -n "$id" ] || die "no notebook on the device"
     page=$(dev "ls $DOCS/$id/*.rm" | head -n 1)
-    sha=$(dev "sha256sum $page" | cut -d' ' -f1)
-    log "notebook $id, page $(basename "$page"), sha256 $sha"
-    sync_has() { docker exec "$SERVER" test -f "/data/rmfakecloud/users/$EMAIL/sync/$1"; }
-    until_ok 180 "the page's exact bytes are in rmfakecloud (blob $sha)" sync_has "$sha"
+    log "notebook $id, page $(basename "$page")"
+    page_on_server() { # rmfakecloud names file blobs by their sha256: the device's page, byte for byte
+        local sha
+        sha=$(dev "sha256sum $page" | cut -d' ' -f1)
+        echo "$sha" > "$W/page.sha256"
+        docker exec "$SERVER" test -f "/data/rmfakecloud/users/$EMAIL/sync/$sha"
+    }
+    until_ok 180 "the page's exact bytes are in rmfakecloud" page_on_server
+    log "page sha256 $(cat "$W/page.sha256")"
     rm -rf "$W/rmfc" "$W/inbox"
     docker cp "$SERVER:/data/rmfakecloud" "$W/rmfc" >/dev/null
     "$REPO/tools/wishes/.venv/bin/python" "$REPO/tools/wishes/wishes.py" scan --rmfakecloud "$W/rmfc" --inbox "$W/inbox" --notebook Notebook
@@ -410,15 +425,16 @@ step_killswitch() {
     local since
     since=$(date -u '+%Y-%m-%d %H:%M:%S')
     power3
-    until_ok 240 "triple-press: mods off (live marker gone)" live_is ""
+    until_ok 240 "triple-press: agent says mods off" result_is "tripletap: mods off ($good)"
+    eq "live marker (empty = stock)" "$(agent | jget live)" ""
     until_ok 120 "triple-press: xochitl runs stock" xovi_off
     has "tripletap log" "$(dev "journalctl -u pp-agent-tripletap --since '$since' --no-pager")" "3 presses"
     "$PPEMU" wait --idle 3000 --timeout 60000 >/dev/null || true
     shot killswitch-off 0.25
     power3
-    until_ok 400 "triple-press again: mods on ($good, health-checked)" live_is "$good"
+    until_ok 400 "triple-press again: mods on, health check passed" result_is "tripletap: mods on ($good)"
+    eq "live" "$(agent | jget live)" "$good"
     until_ok 60 "xochitl has xovi again" xovi_on
-    has "agent result" "$(agent | jget last_result)" "$good"
     "$PPEMU" wait --idle 3000 --timeout 60000 >/dev/null || true
     shot killswitch-on 0.25
 }

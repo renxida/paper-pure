@@ -119,6 +119,7 @@ Additions in `shim/`, the first two for qemu-user:
 - **freopen.** busybox `hexdump` opens files with `freopen`, which upstream didn't hook, so `hexdump /proc/device-tree/...` saw nothing. Now the device shell sees the same fake tree as xochitl.
 - **Hands off systemd** (`hooks.c`): no fakes in PID 1, `systemd-*`, rmemud and rmemu-wifi.
 - **Screen capture lets go before the free** (`fb.c`): the scanner thread kept reading SWTCON's screen buffer after xochitl freed it on exit, and xochitl segfaulted on many stops (3 of 4 pp-agent install/rollback restarts here). Upstream has the same race; with a shell loop nobody saw it. Under systemd each one is a failure, and `OnFailure=emergency.target` rebooted the "tablet". The shim now hooks `free()` for that one buffer.
+- **Only SWTCON's image is the screen** (`fb.c`): the capture takes a full-screen QImage over foreign memory only in xochitl itself and only without a cleanup function. xochitl also renders PDF pages at screen size into pdfium bitmaps wrapped as QImages with a cleanup; the shim used to take those, streamed the PDF page as the screen (blank screenshots), then read the bitmap after pdfium freed it and crashed xochitl, at every start with a PDF in the library, until the start limit rebooted the "tablet". Inherited from upstream rmemu.
 - **Crashes say where** (`hooks.c`): a SIGSEGV/SIGBUS in a shimmed process logs the faulting code and its caller as `library(symbol+offset)` before the default action. That is how the race above was found.
 
 Internal names (`/opt/rmemu`, `/run/rmemu`, `RMEMU_*`, `rmemud`) stay as upstream so their fixes still apply cleanly.
@@ -152,6 +153,8 @@ Found by `test/e2e`: on the systemd emulator, Settings > General > Account > Pai
 
 - `emu/bin/ppemu rebuild` (5 min, with the new `libsystemd-dev` layer): `wpa_supplicant.service` and `rmemu-network1.service` active; `busctl get-property org.freedesktop.network1 ... OnlineState` → `online`; no `[csl]` wifi errors in xochitl's log; `systemctl --failed` still only `swupdate`.
 - Pairing then worked end to end through pp-proxy and rmfakecloud, and so did sync both ways (see `test/e2e/README.md`).
+
+Also found by `test/e2e`, once a PDF had synced down: **xochitl crashed whenever it rendered a PDF page** (`signal 11 ... at rmemu-shim.so`, 5 times in 15 minutes; screenshots went blank first). The shim took the PDF page's pdfium bitmap (a 1404x1872 RGB32 QImage, logged as a second `fb: captured screen buffer`, page-aligned, `cleanup` set) for the screen. With a PDF in the library, every boot then crash-looped into `xochitl.service: Start request repeated too quickly`, `rm-emergency.service`, `Rebooting.`, and the container stopped: the stock `OnFailure=emergency.target` path, seen end to end. Diagnosed by logging each full-screen `QImage(data, ...)`: SWTCON's has no cleanup function, the PDF ones do; all are constructed from `/usr/bin/xochitl`. Fixed in `fb.c` (see above). With the fixed shim swapped in: one capture per start, `rm.docworker ... now exiting` for the PDF, no crash, My files drawn with the PDF's tile.
 
 Not verified: the Wi-Fi settings page (scan list, joining another network), `ppemu wifi off` with xochitl watching (the daemon follows the default route; checked only by reading the code path), an arm64 host.
 
