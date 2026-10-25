@@ -220,6 +220,7 @@ func TestInterruptedInstallLeftForNextRun(t *testing.T) {
 	mustContain(t, a.Update(ctx), "the next run rolls it back")
 	eq(t, "hooks", h.hooks(), []string{"good deactivate install", "bad activate install"})
 	eq(t, "pending", h.state().Pending, "bad")
+	eq(t, "result", h.state().LastResult, "interrupted bad, the next run rolls it back")
 	eq(t, "live", h.live(), "bad")
 	// The triple-press that stopped it: roll back, mods off, bad not retried.
 	if err := h.toggle(); err != nil {

@@ -55,7 +55,15 @@ make -s -C "$REPO/agent" build > /dev/null   # the agent under test, fresh
 [ -f "$WORK/id" ] || ssh-keygen -q -t ed25519 -N '' -C pp-device-test -f "$WORK/id"
 SSHO=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=10)
 export PP_SSH_OPTS="${SSHO[*]}"
-dev() { ssh "${SSHO[@]}" -i "$WORK/id" -p "$PORT" root@127.0.0.1 "$@"; }
+dev() { # ssh to the test bed; under qemu load sshd can miss the banner timeout, so retry that (exit 255)
+    local i rc
+    for i in 1 2 3; do
+        ssh "${SSHO[@]}" -i "$WORK/id" -p "$PORT" root@127.0.0.1 "$@" && return 0
+        rc=$?
+        [ "$rc" = 255 ] && [ "$i" != 3 ] && running || return "$rc"
+        sleep 2
+    done
+}
 inst() { "$REPO/device/install.sh" -p "$PORT" -i "$WORK/id" --key "$WORK/id.pub" "$@" root@127.0.0.1; }
 
 # ------------------------------------------------------------- container

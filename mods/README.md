@@ -195,6 +195,14 @@ The rig: xovi-tripletap v1.1.1 `main.sh` unmodified, run by hand (no systemd), w
 - **Emulator glue for the rig.** `POST_START_COMMANDS=(emu-start)`, plus a test-only `systemctl show` shim that reads the live xochitl's environment.
 - **Reboot.** `ppemu stop` then `ppemu start` gave `stock (no xovi)`, with the drop-in files still on disk (see emulator gaps).
 
+**Hooks under real systemd, through pp-agent** (Oct 25, second pass; `device/test/run.sh` scenario 9, see `device/README.md`)
+
+`release/hooks/activate.sh` and `deactivate.sh` as shipped, with upstream's `xovi/start` and `xovi/stock` at the pinned commit, in the device lane's test bed (the 3.27.2.2 root fs running its own systemd 255; stand-in xochitl, stub hashtab, no `xovi.so`):
+
+- `xovi/start`'s tmpfs drop-in on `/etc/systemd/system/xochitl.service.d` works on top of the `/etc` overlay, and its `Environment=` lines reach xochitl's `/proc/<MainPID>/environ`.
+- Triple-press off and on through `pp-agent toggle`; reboot is stock; install-time crash loops roll back (slow: before the start limit, no reboot; instant: the OS reboots and `pp-agent boot` rolls back); a boot-time crash loop ends that boot stock.
+- `deactivate.sh` brings stock back with one xochitl restart (by `xovi/stock`); its own restart only runs if xochitl is down or still has xovi preloaded.
+
 **Hooks run by hand**
 
 - `activate.sh` gave rc 0 and `checks/20-xovi.sh` passed.
@@ -209,6 +217,7 @@ The rig: xovi-tripletap v1.1.1 `main.sh` unmodified, run by hand (no systemd), w
   - Triple-press on hardware: that the press which wakes the tablet reaches userspace, and the key's input name (see `agent/README.md`).
   - The hashtab build time on the real CPU.
 - **xovi-tripletap's `enable.sh`.** Not used (see "Why not xovi-tripletap").
+- **This pass's hooks in the emulator.** The `reset-failed` lines and the conditional restart in `deactivate.sh` ran in the device test bed only, not in the (now systemd) emulator with real xovi and AppLoad. `mods/emu-smoke.sh --install` there is the next check.
 - **The real xovi.so under systemd.** The device lane's test bed runs the real hooks and upstream's `xovi/start`/`xovi/stock` under systemd 255, but with a stand-in xochitl and no `xovi.so`.
 - **AppLoad's `qtfb` shims and external apps.** Not built.
 - **A from-scratch reproducibility comparison** of the `.so` files.

@@ -77,6 +77,24 @@ Nothing here touches xochitl, its unit, the pen or display stack. We stop update
 
 ## Status
 
+### Verified: kill switch and crash loops (Oct 25, 2026, second pass)
+
+`PP_NAME=pp-killswitch-it PP_PORT=3194 device/test/run.sh <extracted 3.27.2.2 rootfs>`: **84 passed, 0 failed**, about 35 minutes (scenarios 1 to 7 as below, plus 9). Scenario 9 is the real arm64 `pp-agent` under the test bed's systemd 255, with `mods/release/hooks/*.sh` as shipped and upstream's `xovi/start` and `xovi/stock` at the pinned commit (stub hashtab, no `xovi.so`; the stand-in xochitl crashes when it runs with xovi preloaded and the live tree says so). The power key is a FIFO the agent reads; the test writes `struct input_event` records into it.
+
+- **6.** `pp-agent-tripletap` runs from the persisted unit and started after `rm-sanity` exited (monotonic timestamps: 5 s after). `--verify` reports it, and the two `wait-sanity` drop-ins.
+- **7.** After `--uninstall`, `pp-agent-tripletap` is no longer enabled.
+- **9a. Install** of release `tb1` through the real `pp-agent.service`: upstream's tmpfs drop-in on `/etc/systemd/system/xochitl.service.d` works on top of the `/etc` overlay and reaches xochitl (`LD_PRELOAD=/home/root/xovi/xovi.so` and the release's own variable in `/proc/<MainPID>/environ`), and `/run/paper-pure/live` says `tb1`.
+- **9b, 9c. Triple-press.** 3 presses: "tripletap: mods off (tb1)", xochitl runs stock, the drop-in is unmounted, `live` is gone. 2 presses: nothing. 3 more: "mods on (tb1)", through `activate.sh` and the health check.
+- **9d. Reboot returns stock.** `pp-agent boot` logs "activate_on_boot is off", xochitl runs stock; the triple-press service started after `rm-sanity`; 3 presses bring `tb1` back.
+- **9e. Install-time crash loop, 5 s per crash:** the health check saw the first new PID 6 s after `activate.sh` and rolled back to `tb1` (2 crashes in all). `tb2` marked failed, `tb1` live again, same boot, `rm-emergency` never started.
+- **9f. Install-time crash loop, instant:** the start limit came first. Console: `xochitl.service: Start request repeated too quickly`, `Triggering OnFailure= dependencies`, `rm-emergency.service`, `Rebooting.` The agent got SIGTERM 5 s into its check, logged "interrupted before its health check passed; the next run rolls it back" and ran no hooks. After the reboot `pp-agent boot` rolled `tb3` back: `tb1` committed, `tb3` failed, nothing pending. The boot counter was 1 at that boot; no slot switch.
+- **9g. Boot-time crash loop** (`activate_on_boot: true`, `tb1` broken on purpose): `pp-agent boot` activated it, saw the loop, logged "tb1 unhealthy at boot (1/3)" and ran stock; no emergency reboot, counter 1.
+- **9h. The `disable` file:** with it, 3 presses turn mods off, 3 more say "mods already off"; `pp-agent.service` is skipped (`ConditionResult=no`).
+- `systemd-analyze verify --root=<copy of the tatsu systemd tree>` on the four agent units with both `wait-sanity.conf` drop-ins: no output, exit 0 (host systemd 255). A typo'd copy is reported.
+- `device/install.sh --agent` runs `agent/install.sh` with plain `sh` and no `install(1)` shim (`shim/` is gone).
+- Flake seen once: under qemu load dropbear missed ssh's 10 s banner timeout (`Connection timed out during banner exchange`), which killed a run with exit 255. `run.sh`'s `dev` and `install.sh`'s fresh-connection check now retry that.
+- Logs and the agent's own log of these runs: scratch `work-pp-killswitch/tb2/` (not in the repo).
+
 ### Verified (Oct 25, 2026, x86_64 dev container, qemu-user for arm64)
 
 The test bed (`test/testbed/`) is the real 3.27.2.2 root fs running its own systemd 255 as PID 1 in a container, laid out like the tablet: `/` read-only, `/etc` overlaid by the image's own `var-volatile-etc.service`, `/etc/dropbear` bound from `/home` by the stock `etc-dropbear.mount`, the stock dropbear behind the stock developer-mode check, persistent `/home` and `/data` volumes, and a fake boot ROM counter (`lpgpr`) that survives reboots. A reboot is the container stopping and starting. Differences from the tablet: xochitl is a stand-in that pets the watchdog; memfaultd and systemd-resolved can't run there; hardware units are masked in `/run` only.
@@ -90,7 +108,8 @@ The test bed (`test/testbed/`) is the real 3.27.2.2 root fs running its own syst
 5. Drift: a live-only unmask is caught (and reported as live vs root fs drift); a root-fs-only edit of `/etc/hosts` is caught; the Wi-Fi SSH marker is caught. `install` repairs all three.
 6. `--agent --proxy`: exits 0 and `/` goes back to read-only. After a reboot, `--verify` passes with the agent and proxy checks; `pp-proxy.service` runs from the persisted unit; `my.remarkable.com` resolves to `127.0.0.1`; the proxy's CA is in the live bundle; `pp-agent.timer` is active; `wait-sanity.sh` logs "rm-sanity done, roota_errcnt=0 after 34s"; `pp-agent boot` started 3 s after `rm-sanity` exited (monotonic timestamps), and logged "boot: stock (no release installed)".
 7. `--uninstall`, then reboot: verify fails again (stock), `swupdate.service` is enabled, no freeze block, stock hosts lines intact, `pp-agent-boot` not enabled. `install` brings it all back.
-8. (`PP_SLOW=1`) A stand-in "mod" that breaks xochitl at every boot. Started as soon as xochitl is up (a naive autostart), the stock units reboot the tablet after 34 to 37 s (console: `xochitl.service: Start request repeated too quickly`, `Triggering OnFailure= dependencies`, `rm-emergency.service`, `Rebooting.`), before rm-sanity, and the counter goes 1, 2, 3, then over the limit: a slot switch. The same "mod" behind our wait (an `ExecStartPost` on `pp-agent-boot`): it reboots after 82 to 83 s, the counter is 1 at every boot, no slot switch. After that, `--verify` still passes.
+8. (`PP_SLOW=1`, first pass only) A stand-in "mod" that breaks xochitl at every boot. Started as soon as xochitl is up (a naive autostart), the stock units reboot the tablet after 34 to 37 s (console: `xochitl.service: Start request repeated too quickly`, `Triggering OnFailure= dependencies`, `rm-emergency.service`, `Rebooting.`), before rm-sanity, and the counter goes 1, 2, 3, then over the limit: a slot switch. The same "mod" behind our wait (an `ExecStartPost` on `pp-agent-boot`): it reboots after 82 to 83 s, the counter is 1 at every boot, no slot switch. After that, `--verify` still passes.
+9. Kill switch and crash loops: see the second-pass section above.
 
 Also checked:
 
@@ -108,6 +127,8 @@ Also checked:
 - An AAAA (IPv6) lookup of a blocked name. systemd-resolved can't run in the test bed, so name lookups there went to `/etc/hosts` directly.
 - Tailscale login, reachability, battery cost.
 - The developer mode flow itself and onboarding without Wi-Fi.
+- Scenario 9 with the real `xovi.so` and real xochitl (the test bed has a stand-in), and `PP_SLOW=1` (scenario 8) on this pass's files.
+- A real power key: the test writes events into a FIFO. See `agent/README.md` for what is unknown on hardware.
 
 ### Open questions for Cedar
 

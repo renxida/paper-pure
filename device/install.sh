@@ -132,4 +132,9 @@ step "freeze the OS, keep SSH private, persist units"
 on 'bash /home/root/paper-pure/device/pp-device.sh install'
 
 step "SSH still works on a fresh connection"
-"${SSH[@]}" -o ControlPath=none -o BatchMode=yes "$TARGET" true && echo "PASS    fresh SSH connection (key auth)"
+for try in 1 2 3; do   # a new connection; a busy tablet can be slow to answer
+    "${SSH[@]}" -o ControlPath=none -o BatchMode=yes "$TARGET" true && { echo "PASS    fresh SSH connection (key auth)"; exit 0; }
+    sleep 3
+done
+echo "FAIL    no fresh SSH connection with the key"
+exit 1

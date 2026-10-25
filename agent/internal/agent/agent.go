@@ -418,6 +418,9 @@ func (a *Agent) update(ctx context.Context) (string, error) {
 		return "unpack failed", err
 	}
 	if err := a.install(ctx, m, "install"); err != nil {
+		if ctx.Err() != nil {
+			return "interrupted " + m.ID + ", the next run rolls it back", err
+		}
 		return "rolled back " + m.ID, err
 	}
 	return "installed " + m.ID, nil
