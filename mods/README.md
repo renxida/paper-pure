@@ -222,6 +222,13 @@ The rig: xovi-tripletap v1.1.1 `main.sh` unmodified, run by hand (no systemd), w
 - **AppLoad's `qtfb` shims and external apps.** Not built.
 - **A from-scratch reproducibility comparison** of the `.so` files.
 
+### Re-run on the systemd emulator (pp-emu-fidelity lane), Oct 25 2026
+
+- `ppemu reset`, `start`, `skip-setup`, then `mods/install.sh emu` with no emulator special case: `xovi ON`, all three `.so` mapped, 107 s. The drop-in is a real tmpfs mount and `systemctl show -P Environment xochitl` shows `LD_PRELOAD`. `ppemu stop`/`start` → `stock (no xovi)`, drop-in dir gone.
+- `mods/emu-smoke.sh`: ok (83 to 95 s).
+- Through pp-agent with default config: `e2e-1` installed, `e2e-2-broken` rolled back by the agent's own check. Details in `emu/README.md` Status.
+- Not re-run: rung 1, the build from an empty cache.
+
 ### Emulator gaps found (all fixed since in `emu/`: it now runs the image's own systemd; `device/emu-start` is gone)
 
 - **No systemd drop-ins.** `xovi/start` writes `Environment=` into `/etc/systemd/system/xochitl.service.d/` and restarts xochitl. The emulator's supervisor ignores that, and the container can't `mount` (tmpfs), so the files also survive a container restart. Workaround here: `device/emu-start`.

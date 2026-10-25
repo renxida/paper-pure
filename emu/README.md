@@ -26,7 +26,7 @@ emu/bin/ppemu reset          # factory reset: removes the container and the pp-e
 emu/bin/ppemu help           # everything else
 ```
 
-Every command returns once the screen has settled: `start`, `skip-setup` and `restart` wait for xochitl's UI, input commands wait for the redraw. `reset` leaves the emulator stopped; the next `start` boots the onboarding screen.
+Every command returns once the screen has settled: `start`, `reboot`, `skip-setup` and `restart` wait for xochitl's UI, input commands wait for the redraw. `reset` leaves the emulator stopped; the next `start` boots the onboarding screen.
 
 Simulator UI for humans: http://127.0.0.1:7777 (pen, eraser, finger, power key, Marker). Agents: [the `pure-emulator` skill](../.claude/skills/pure-emulator/SKILL.md).
 
@@ -34,7 +34,7 @@ Names: container `pp-emu-tablet`, images `pp-emu-tatsu:<version>` (emulator) and
 
 On an arm64 host nothing changes: same commands, no qemu, and the CLI drops its long waits on its own (it checks `process.arch`).
 
-How slow is x86_64? Measured here (4 vCPU, qemu 8.2): `start` on a factory-fresh device 100 to 117 s to the Welcome screen; `skip-setup` 66 s to My files; `start` of a stopped device 65 s; `restart` 62 s; `rebuild` 2 to 2.2 min back to My files; a tap 4 to 6 s round trip; Settings 11 s; a pen stroke 5 s. The very first `start` also imports the rootfs (about 1 min) and builds the image, whose apt step takes about 6.5 min under qemu once (cached after). The CLI waits longer on non-arm64 hosts (`PPEMU_SLOW=1|0` overrides).
+How slow is x86_64? Measured here (4 vCPU, qemu 8.2, with systemd): `start` on a factory-fresh device 125 s to the Welcome screen; `skip-setup` 65 s to My files; `start` of a stopped device 87 s; `reboot` 91 s; `stop` 6 s; `restart` 68 s; `rebuild` about 2.5 min back to My files; a tap 4 to 6 s round trip; Settings 11 s; a pen stroke 5 s. The very first `start` also imports the rootfs (about 1 min) and builds the image, whose apt step takes about 6.5 min under qemu once (cached after). The CLI waits longer on non-arm64 hosts (`PPEMU_SLOW=1|0` overrides).
 
 ## How it works
 
@@ -80,7 +80,7 @@ So the rest of the stack runs here unmodified. `docker/boot.sh` lays out the mou
 
 - **`wlan0`** is the container's only interface, on docker's default bridge, up, with the default route: what pp-agent's Wi-Fi gate wants, with default config. `ppemu wifi off` disconnects it (flight mode: pp-agent says `no wlan0`). While it is off, the host can't reach the device either (no SSH, no screen); use `docker exec pp-emu-tablet ...`.
 - **The host** is the bridge gateway, usually `172.17.0.1` (`ppemu status` says). A server on the host must listen there or on `0.0.0.0`. Example: `ppsign serve -dir FEED -addr 172.17.0.1:3191`, then `"feed_url": "http://172.17.0.1:3191/"` in the device's `agent.json`. `host.docker.internal` does not exist inside (docker's `/etc/hosts` is replaced by the tablet's).
-- **Names** resolve like on the tablet: glibc asks `systemd-resolved` (running), which reads `/etc/hosts`; docker's DNS servers stand in for DHCP's. Edits to `/etc/hosts` work at once and are gone at reboot unless persisted (`pp-device.sh persist /etc/hosts`). Note: resolved answers a `0.0.0.0` line with "no address" (NODATA), not with `0.0.0.0`. Static Go programs read `/etc/hosts` themselves.
+- **Names** resolve like on the tablet: glibc asks `systemd-resolved` (running), which reads `/etc/hosts`; docker's DNS servers stand in for DHCP's (from Claude's cloud dev containers, outside DNS doesn't answer at all). Edits to `/etc/hosts` work within a second and are gone at reboot unless persisted (`pp-device.sh persist /etc/hosts`). Note: resolved answers a `0.0.0.0` line with "no address" (NODATA), not with `0.0.0.0`. Static Go programs read `/etc/hosts` themselves.
 - To route the device's cloud traffic to a test server: point names at it in `/etc/hosts` (pp-proxy's `hosts` block does this for reMarkable's sync names, at `127.0.0.1`), and give pp-proxy/pp-agent the host address.
 
 ## Firmware
@@ -143,6 +143,38 @@ What the emulator can't tell you. Test these on the tablet.
 - Host side (`host/`, `bin/ppemu`) is plain Node with no dependencies.
 
 ## Status
+
+### Fidelity pass: the image's own systemd (pp-emu-fidelity), Oct 25 2026
+
+Same host (x86_64, 4 vCPU, qemu-user). The emulator now boots the image's own systemd with the tablet's mounts (see "Like the tablet"). `mods/device/emu-start` and the stub `systemctl` are gone.
+
+One script from `ppemu reset`, 17 min, **28 checks, 0 failed** (script and logs in the lane's scratch, `work-pp-emu-fidelity/proof.sh`, `proof2.log`):
+
+- `reset` 6 s, `start` 125 s to the Welcome screen, `skip-setup` 65 s to My files (drawn when it returns). `systemctl is-system-running` → `degraded`, only `swupdate` failed. `/` read-only, `/etc` an overlay with upper `/var/volatile/etc`, `wlan0` up with the default route.
+- A static binary sees the fake battery: `pp-agent status` → `"battery_percent": 85`.
+- `mods/install.sh emu`, no emulator special case: `xovi ON`, `appload.so`, `qt-resource-rebuilder.so`, `xovi.so` mapped, 107 s (hashtab 70 s). The drop-in dir is a tmpfs mount; `systemctl show -P Environment xochitl` has `LD_PRELOAD=/home/root/xovi/xovi.so`. `mods/emu-smoke.sh` then passes (AppLoad → Hello, its log line found in `docker logs`), 83 to 95 s.
+- `ppemu stop` (6 s) then `ppemu start` (87 s): `xochitl.service.d` gone, xochitl maps no xovi, `status` says `stock`.
+- `device/install.sh -p 2222 -i emu/.ppemu/id_ed25519 --key ... root@127.0.0.1`: every unit, mask and hosts step applied and all checks PASS except four: `device.cloud.remarkable.com resolves to '?', not 0.0.0.0` (and the other three blocked names). Not an emulator gap: systemd-resolved runs here, as on the tablet, and answers a `0.0.0.0` hosts line with "no address". The names are blocked harder than the check expects; the check needs fixing in `device/` (reported).
+- `device/install.sh --agent` with `agent.json` = `{"feed_url": "http://172.17.0.1:3191/", "status_url": ...}` and nothing else (default gates: Wi-Fi required, battery floor 30, 45 s stability): `pp-agent.timer` fired, `result: installed e2e-1` (`mods/out/release`, `-expect-mapped xovi.so -expect-mapped appload.so`), served by `ppsign serve -addr 172.17.0.1:3191` on the host.
+- `e2e-2-broken` (no `appload.so`): `rolling back e2e-2-broken -> e2e-1: xochitl (pid 4801) has not loaded "appload.so"`, then `result: rolled back`. No xochitl crash, no reboot.
+- `ppemu reboot` (91 s, UI drawn): units still enabled from the real root fs; `pp-agent-boot` logged `rm-sanity done, roota_errcnt=0 after 32s` (the device lane's wait, against the fake lpgpr) and `boot: stock`; `--verify` again only the four lookups.
+- Gates: `ppemu battery 15` → `skipped: battery 15% < floor 30%`; `ppemu wifi off` → `skipped: no wlan0`; `wifi on` → `wlan0` up again.
+- Triple-press, three `power` keys 0.6 s apart: `pp-agent-tripletap.service` (static Go, reading the `/dev/input/event0` FIFO, found by name `44440000.bbnsm:pwrkey`) logged `3 presses` and turned e2e-1 on.
+
+Found and fixed on the way:
+
+- **xochitl segfaulted on stop** in 3 of 4 pp-agent install/rollback restarts. Under systemd that is a unit failure, and `OnFailure=emergency.target` rebooted the device (pp-agent-boot then rolled back correctly, twice). The new crash log said `__memcmpeq` called from `rmemu-shim.so`: the shim's screen scanner read the buffer after SWTCON freed it. Inherited from upstream rmemu. Fixed (`free()` hook); 0 crashes since: none in the proof run, none in 7 back-to-back restarts with xovi loaded, 10 to 40 s apart.
+- systemd PID 1 aborted with the shim's `realpath` fakes, and logind crashed on its fake device monitor: the shim now leaves systemd, its daemons and rmemud alone.
+- Unit credentials can't be set up in this container ("243/CREDENTIALS"), which broke tmpfiles, logind and resolved: reset with `/run` drop-ins.
+- Under qemu, xochitl's main thread can be busy for over 60 s and the stock watchdog killed it, four times then a reboot: `WatchdogSec=10min` under qemu-user only.
+- docker cp can't see the device's mounts, so `ppemu push`/`pull` go through `tar` in the device; `ppemu start`/`restart`/`skip-setup` now wait for the new xochitl's first frame (rmemud comes up long before xochitl).
+
+Not verified:
+
+- An arm64 host: the systemd setup (cgroup v2, `--cgroupns host`, AppArmor unconfined) was run on cgroup v1 here only.
+- The real tablet's systemd and sysfs: the emulator follows the image, not hardware.
+- Sync: rm-sync runs but was not pointed at a server (the e2e lane's job).
+- The `OnFailure=emergency.target` reboot path after the fix (it is stock and was seen working before the fix, by accident).
 
 ### Independent re-check (second agent, README only, same host), Oct 25 2026
 

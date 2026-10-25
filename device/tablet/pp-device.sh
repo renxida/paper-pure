@@ -264,6 +264,14 @@ check_inactive() {
 resolves_to() { # name -> address the C library returns (via busybox wget's message)
     { wget -T 2 -O /dev/null "http://$1:9/" 2>&1 || true; } | sed -n 's/.*(\([0-9a-fA-F.:]*\):9).*/\1/p; s/.*remote host (\([0-9a-fA-F.:]*\)).*/\1/p' | head -n 1
 }
+no_address() { # name: systemd-resolved (the tablet's resolver) answers a 0.0.0.0 hosts line with "no address" (NODATA), for A and AAAA
+    command -v resolvectl >/dev/null 2>&1 || return 1
+    local t out
+    for t in A AAAA; do
+        out=$(resolvectl query -t "$t" "$1" 2>&1 || true)   # exits 1 on "no address"
+        case $out in *'does not have any RR of the requested type'*) ;; *) return 1 ;; esac
+    done
+}
 
 # ---------------------------------------------------------------- install
 step_files() { # our own helpers, kept on /home (persistent)
@@ -350,7 +358,9 @@ cmd_verify() {
     check_hosts_block "paper-pure freeze" "$HERE/freeze.hosts"
     while read -r n; do
         a=$(resolves_to "$n")
-        if [ "$a" = 0.0.0.0 ]; then pass "resolves to 0.0.0.0: $n"; else fail "$n resolves to '${a:-?}', not 0.0.0.0"; fi
+        if [ "$a" = 0.0.0.0 ]; then pass "resolves to 0.0.0.0: $n"
+        elif [ -z "$a" ] && no_address "$n"; then pass "resolves to no address (systemd-resolved, A and AAAA): $n"
+        else fail "$n resolves to '${a:-?}', not 0.0.0.0"; fi
     done < <(awk '$1 == "0.0.0.0" { print $2 }' "$HERE/freeze.hosts")
     # SSH stays private.
     if [ -e "$WIFI_SSH_MARKER" ]; then fail "SSH over Wi-Fi marker is present ($WIFI_SSH_MARKER)"; else pass "SSH over Wi-Fi marker absent"; fi
