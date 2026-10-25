@@ -158,11 +158,23 @@ PP_BUILD_CA=/root/.ccr/ca-bundle.crt make proof   # in the dev container (TLS-in
 
 ## Status
 
-Verified (Oct 25, 2026, in the dev container):
+Verified (Oct 25, 2026, in the dev container), wishes and logs:
+
+- `make test`: `go vet` clean, `go test -race` passes, shellcheck clean. New ppd tests: wish pages and logs refused with no token, a wrong one, the publish token, `Bearer ` with nothing after it, and a token without `Bearer`; refused even for missing files, so nothing leaks by 404 vs 403; served with the token, `index.json` as JSON, the log as `text/plain` whatever is in it, `nosniff` and `sandbox` on both; `PUT`, `POST`, `DELETE` give 405 and change nothing; dot folders (a scan in progress), `..`, a third level, `/pp/logs/.hidden` give 404; a Range tail of the log; an unset token turns both off. `logtee`: stdout byte for byte, UTC times in the file, rotation keeps the newest lines in order with none missing, and an unwritable file still copies everything to stdout plus one warning.
+- Mutation check on a scratch copy, 13 mutations, each one alone: no read-token check, no segment check, any depth, any log file name, the log sniffed, no CSP, writes allowed, `Bearer` optional, an empty token matching, no rotation, no time, local time instead of UTC, logtee stopping on a file error. Every one makes a test fail. The first run missed three (depth, log names, the empty token: over HTTP a trailing space is trimmed, so only a direct test of `bearer` reaches it); tests were added for each.
+- `PP_BUILD_CA=/root/.ccr/ca-bundle.crt make proof`: **PASS 91**, rc 0, 1m55s to 2m10s with the image rebuilt from cache (3 runs, the last after the final edits). New steps:
+  - 7: after pairing, a stand-in for rm-sync (`test/tablet-sync.py`) uploads the two test notebooks from `tools/wishes/testdata` over sync v3 through pp-proxy, the gate and ppd: 10 blobs (8 files, 2 notebook indexes), a new root index, then the root pointer. It writes indexes by the rule a real 3.27.2.2 rm-sync tree follows: rebuilt with that rule, both indexes of the tree from the e2e run come out with the same bytes and names. Within the 5 s scan interval `/pp/wishes/index.json` lists exactly the 3 wish pages; each `page.rm` is byte-identical to the tablet's page, each `page.png` is a 1404x1872 PNG, each `issue.md` carries its key. Refused: no Access token (403 at the gate); Claude's Access token without the read token, the tablet's Access token alone, with the publish token, or with its rmfakecloud token (403 from ppd); `PUT` (405); `/pp/wishes/../status/tatsu` (404). A later scan leaves `index.json` unchanged.
+  - 7b: `/pp/logs/server.log` has lines from the entrypoint, rmfakecloud (`got sync completed`), ppd (the status line, the refusals), and the wish scan (`3 new`, then `0 new, 3 unchanged`); every line starts with a UTC time; `-r -2000` returns 2000 bytes. Without the read token: 403 for Claude's and the tablet's Access tokens. The tablet's log tail is at `/pp/status/tatsu`.
+  - 8: the restore drill brings back the wish inbox (`index.json` identical) with the rest: 42 files, sha256 identical.
+- `tools/wishes` against this image: `make test` 22 passed; `make proof` PASS 10 with `HASH_SCHEMA_VERSION=3` and `=4`.
+- Hash pinning: the image build installs with `--require-hashes --only-binary=:all:`. A changed hash fails (`THESE PACKAGES DO NOT MATCH THE HASHES`), and so does dropping the `packaging` line (`all requirements must have their versions pinned`). `pip download` for linux aarch64 and macOS arm64 passes the same file, so CI's arm64 runners and a Mac venv get checked wheels too.
+- The entrypoint, by hand: `docker logs` and `/data/log/server.log` carry the same lines; a bad `BACKUP_AT`, a bad `WISHES_EVERY` (`0`, `abc`) or no `JWT_SECRET_KEY` still exits 1 with its reason visible; killing rmfakecloud stops the container (exit 1) with `a daemon exited` as the last line in both; `kill -9` on logtee stops the container too (exit 141, SIGPIPE), so the host restarts it rather than run without a log. `docker stop` takes about 1.3 s, exit 0 (up to 1 s waiting for the last log lines). A scan of the 3 test pages in the image: 1.7 s, 99 MB peak. Idle, the processes add up to about 44 MB RSS without cloudflared.
+
+Verified earlier (Oct 25, 2026, in the dev container):
 
 - `make test`: `go vet` clean. `ppd` tests pass with `-race`: the proxy to rmfakecloud, `/pp` never leaking to it, healthz 200 and 503, publish refused without, with a wrong, or with an empty token, a Range GET answered 206 with the right bytes, path tricks (`..`, dotfiles, extra segments) refused, status kept and pruned to N, history newest first, bad JSON, bad device names and oversize bodies refused. `pp-proxy` tests pass too (see its README).
 - Mutation check on a scratch copy: removing any one of the publish-token check, the empty-token guard, the file-name or device-name check, pruning, the `/pp` routing, or the status size limit makes a test fail. The first run caught a real gap: an empty token matched a missing header. Fixed and tested.
-- `PP_BUILD_CA=/root/.ccr/ca-bundle.crt test/local-proof.sh`, which rebuilds the image first: **PASS 59**, rc 0, 2m14s (a cold image build adds about 1m40s). Steps:
+- `PP_BUILD_CA=/root/.ccr/ca-bundle.crt test/local-proof.sh`, which rebuilds the image first: **PASS 59** then (91 now, above), rc 0, 2m14s (a cold image build adds about 1m40s). Steps:
   - The image builds from pinned digests and rmfakecloud commit `3c6de006`. `compose.yaml` alone publishes no port. Locally only `127.0.0.1:3080` is published. rmfakecloud and ppd run as uid `pp`, not root.
   - A user is created with the CLI. After the restart, web login works, `/health` says `Working`, and a PDF uploaded through the web UI is listed.
   - The fake Access gate refuses requests without the token (403) and lets the tablet's token through.
@@ -172,12 +184,15 @@ Verified (Oct 25, 2026, in the dev container):
   - `pp-proxy` on the real 3.27.2.2 tatsu userland passes 18 checks (see its README).
   - Backup drill: the entrypoint's nightly loop, scheduled two minutes out, fires on time and backs up as `pp` to a local restic repo. A manual `backup.sh` from a root shell re-runs itself as `pp`, so no repo file is root-owned. Sunday's `restic check` reported no errors. The repo holds neither the user's email nor the file name in plaintext. The data volume is deleted and a fresh server starts with no users and no status. `restore.sh latest` and a restart bring every file back identical (sha256 of all 15). Then the same password logs in, the PDF is listed, the tablet status and the feed are back, the paired tablet's old token still reads the same sync root, and the agent reports again. Restored files are owned by `pp`.
   - Teardown leaves no containers and no volumes.
-- The container stops cleanly on `docker stop` in 0.2 s, exit 0. A bad `TUNNEL_TOKEN` stops the whole container (exit 1) instead of running half up, and a bad `BACKUP_AT` refuses to start (exit 1) instead of silently skipping backups. Idle memory is about 11 MiB without cloudflared.
+- The container stops cleanly on `docker stop` in 0.2 s, exit 0 (1.3 s now, above). A bad `TUNNEL_TOKEN` stops the whole container (exit 1) instead of running half up, and a bad `BACKUP_AT` refuses to start (exit 1) instead of silently skipping backups. Idle memory was about 11 MiB without cloudflared, before Python and logtee.
 - `systemd-analyze verify` on `tablet-proxy/pp-proxy.service` against the tatsu systemd tree: clean.
 - `render.yaml` parses. Its field names match those in Render's own CLI source (`render-oss/cli`).
 
 Not verified:
 
+- A wish from the real tablet through the server's own scan. Real rm-sync into rmfakecloud, then `tools/wishes` on a copy, is proven in the emulator (`test/e2e`, step `sync`); here the upload is our stand-in, with the same tree format.
+- Python, the wheels and the scan on Render, and the wheels built on an arm64 host (only `pip download` was checked for arm64).
+- Log volume over weeks with a real tablet, so how many days 8 MiB really holds.
 - Anything on real Cloudflare (tunnel, Access policies, service tokens, the 401 setting, websockets through the tunnel) or on Render (Blueprint, disk, BuildKit `ADD <git>` and `--mount=type=secret` in their builder, shell, log retention). No accounts were made.
 - Real sync from a real tablet. (From the emulator's stock xochitl on 3.27.2.2 it works: see `test/e2e/README.md`.)
 - restic against B2, and the no-`deleteFiles` key setup.
@@ -189,6 +204,8 @@ Open questions for Cedar:
 - **Host:** Render (recommended, about $8/mo) or Fly.io (about $4/mo)? And which region (it sets `TZ` for the backup time)?
 - **Domain:** which domain is on Cloudflare, so `pp.<domain>` exists?
 - **Backups:** Backblaze B2 as the second provider?
-- **Server logs for Claude:** Render's API key can do everything on the account. Options: (a) Cedar reads Render logs when asked, (b) ship logs to a log service with a read-only token, (c) a small next step where ppd keeps its own rotated log and serves it under `/pp/` behind the `pp-claude` token. Recommend (c).
+- **Server logs for Claude:** done as option (c): the container keeps its own rotated log and ppd serves it to `PP_READ_TOKEN`. Render's API key (full account access) stays with Cedar.
+- **Status reads:** `/pp/status/<device>` stays open to every token that passes Access (the tablet's and CI's too), as before; it holds what the tablet runs and its agent log, not notes. Move it behind the read token as well? `test/e2e` would need to send it.
+- **A tighter Access app for Claude (optional):** a second Access app on `pp.<domain>/pp/` paths only, for the `pp-claude` policy, would keep Claude's Access token off rmfakecloud's pages entirely. Not needed while rmfakecloud's login guards them.
 - **Auto-deploy:** `render.yaml` redeploys on every merge to main that touches `server/`. OK?
 - **Token lifetime:** service tokens expire after the duration you pick. One year with a reminder, or non-expiring?

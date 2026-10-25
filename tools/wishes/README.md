@@ -2,7 +2,9 @@
 
 Desiderata row 9. Cedar writes a wish on the tablet; this turns it into a folder Claude can read: the page as a PNG, its metadata, and a draft issue. Claude reads the PNG itself. No handwriting service, no new vendor.
 
-One Python file (`wishes.py`), two pinned libraries: [rmscene](https://github.com/ricklupton/rmscene) to read `.rm` v6 pages and Pillow to draw them.
+One Python file (`wishes.py`), two hash-pinned libraries: [rmscene](https://github.com/ricklupton/rmscene) to read `.rm` v6 pages and Pillow to draw them. The server runs it every 15 minutes on its copy of the notes and serves the result to Claude only.
+
+`wishes.py` here is a link to [`server/wishes/wishes.py`](../../server/wishes/wishes.py): the server image runs that file, and Docker can only copy from `server/`. The pins are in [`server/wishes/requirements.txt`](../../server/wishes/requirements.txt), shared by the image and this venv. This folder keeps the tests, the fixtures and the emulator scan.
 
 ## Filing a wish (Cedar)
 
@@ -32,7 +34,15 @@ A page is keyed by notebook id and page id. `scan` emits it when it is new or it
 
 ### For Claude: from wish to change
 
-1. Fetch `index.json`. Each folder's issue footer carries `wish <key> r<N>`; search the issues for the key to see what is already filed.
+1. Fetch `index.json` from the server, then the folders that are new to you (the `pp-claude` Access token plus `PP_READ_TOKEN`; see [server/README.md](../../server/README.md#what-claude-reads)):
+
+   ```sh
+   A=(-H "CF-Access-Client-Id: $ID" -H "CF-Access-Client-Secret: $SECRET" -H "Authorization: Bearer $READ")
+   curl -fsS "${A[@]}" https://pp.<domain>/pp/wishes/index.json
+   for f in page.png wish.json issue.md; do curl -fsS "${A[@]}" -o "$f" "https://pp.<domain>/pp/wishes/<folder>/$f"; done
+   ```
+
+   Each folder's issue footer carries `wish <key> r<N>`; search the issues for the key to see what is already filed.
 2. Read `page.png` (and any typed text in `issue.md`). Write the title and copy the words as written. Describe sketches in a line. If a word is unclear, ask Cedar; don't guess.
 3. File the issue with the transcription only (`gh issue create --body-file issue.md`). The repo is public: never attach `page.png` or `page.rm`.
 4. Then the usual loop: a failing test first, the change, rungs 1 and 2, ship over the air. The issue's checklist says so.
@@ -41,7 +51,7 @@ A page is keyed by notebook id and page id. `scan` emits it when it is new or it
 
 ```sh
 cd tools/wishes
-make venv      # .venv with the pinned rmscene, Pillow, pytest
+make venv      # .venv with the pinned rmscene, Pillow, pytest; needs python3 3.13 (the wheel hashes are for 3.13)
 make test      # 22 tests, ~20 s, plus shellcheck
 make proof     # real rmfakecloud from the server image (make -C ../../server image), ~10 s; HASH_SCHEMA_VERSION=4 too
 make emu       # scan the running emulator's notebooks into .inbox-emu/
@@ -53,17 +63,19 @@ make emu       # scan the running emulator's notebooks into .inbox-emu/
 
 `scan` prints one line per new folder on stdout and a summary on stderr. It exits 1 if a blob doesn't match its hash (rmfakecloud mid-write) or the format is unknown; the next run tries again. Options: `--notebook` (default `Wishes`), `--tag` (default `wish`).
 
-## Where it should run (proposal, not built)
+## Where it runs
 
-On the server, next to rmfakecloud, every 15 minutes:
+On the server, next to rmfakecloud. The entrypoint's wish loop runs, every `WISHES_EVERY` seconds (default 900):
 
 ```sh
-wishes.py scan --rmfakecloud /data/rmfakecloud --inbox /data/pp/wishes
+python3 -I /usr/local/bin/wishes.py scan --rmfakecloud /data/rmfakecloud --inbox /data/pp/wishes
 ```
 
-and ppd serves `GET /pp/wishes/<path>` read-only, the way it serves the release feed. Claude's `pp-claude` token then reads the wish pages and nothing else of Cedar's notes. Claude fetches on a schedule (a daily scheduled task) or when Cedar says "new wish".
+ppd serves the inbox read-only at `GET /pp/wishes/index.json` and `GET /pp/wishes/<folder>/<file>`, only with `PP_READ_TOKEN`, which only Claude has. So Claude reads the wish pages and nothing else of Cedar's notes; the tablet's and CI's tokens get 403. Each scan logs one line (`wishes: N new, …`) to the server log at `/pp/logs/server.log`. The inbox is in the nightly backup with the rest of `/data`.
 
-What the server lane would add: Python and the two wheels to the image (site-packages is 35 MB; checked in `python:3.13-slim-trixie`, the server's Debian), a loop line in `entrypoint.sh`, and one read-only route in ppd. Not done here: `server/` belongs to another lane.
+Picking wishes up is Claude's job and stays one: a scheduled Claude task (daily, say) or Cedar saying "new wish" runs the steps above. No scheduled task exists yet, and nothing here posts to GitHub.
+
+Cost: Python and the two wheels add about 78 MB to the server image (the Python base 45 MB, rmscene and Pillow 33 MB). A scan of the 3 test pages takes 1.7 s and peaks at 99 MB.
 
 Alternatives considered: Claude logging in to rmfakecloud (sees every note, so no); the tablet agent uploading wish pages itself (a second copy of the selection logic in Go, so no).
 
@@ -89,22 +101,29 @@ Claude reading `page.png` needs none of that, and it also reads sketches, arrows
 
 ## Status
 
-### Verified (Oct 25 2026, this container)
+### Verified (Oct 25 2026, this container): on the server
+
+- **The server scans and serves it.** `server/` `make proof` (PASS 91) syncs both test notebooks up the way rm-sync does (sync v3 PUTs through pp-proxy, then the root pointer), and within the 5 s test interval `/pp/wishes/index.json` lists exactly the 3 wish pages, each `page.rm` byte-identical to the uploaded page and each `page.png` 1404x1872. Without `PP_READ_TOKEN` it is refused (403) for Claude's Access token alone, the tablet's token, the publish token and the tablet's rmfakecloud token; writes get 405; a later scan changes nothing; the restore drill brings the inbox back. Details in [server/README.md](../../server/README.md#status).
+- **Hash-pinned.** `make venv` installs with `--require-hashes --only-binary=:all:` from `server/wishes/requirements.txt` plus pytest's pins: same versions as before, `make test` 22 passed. A changed hash or a dropped dependency line is refused by pip. Linux x86_64 (the image build) and aarch64 and macOS arm64 (`pip download`) wheels all pass the same file. With Python 3.12, `make venv` stops with `tools/wishes needs python3 = 3.13`.
+- `make proof` PASS 10 again against the new image, with both `HASH_SCHEMA_VERSION=3` and `=4`.
+- Real rm-sync: `test/e2e` (step `sync`) drew a page in the emulator's stock 3.27.2.2 xochitl, synced it to rmfakecloud, and rendered the server's copy with this tool: ink at all 4 drawn points, white elsewhere.
+
+### Verified earlier (Oct 25 2026, this container)
 
 - **Real pages from the emulator.** In `emu/` (stock 3.27.2.2 under qemu) I made a notebook named "Wishes" with the on-screen keyboard and drew "ADD CLOCK" and a clock with `ppemu draw` at known points (14 strokes). Then page 2 got typed text "Dark mode" (title style), a fineliner underline and a moon. A second notebook, "Notebook", got "BIG ICONS" on page 1, tagged `wish` in the tag panel, and "NO" on page 2, untagged. `ppemu pull` copied them out; they are `testdata/xochitl/` (our strokes, xochitl's file format; 52 KB).
 - **Render matches xochitl.** `wishes.py render` on page 1, compared with `ppemu screenshot --scale 1` of the same page (toolbar cropped): 100% of xochitl's dark pixels are within 2 px of ours, and 100% of ours are within 2 px of xochitl's (99.2 to 100% within 1 px). Page 2's strokes, anchored to the typed text, are also 100% within 2 px both ways (98.6% within 1 px; the text itself is excluded because the fonts differ). Proof PNGs: `/tmp/claude-0/-home-user-paper-pure/06f32124-bc97-5f8b-9922-5528a40bd7c7/scratchpad/work-pp-wishes/render-wishes-p1.png` and `render-wishes-p2.png`.
 - **`make test`: 22 passed** (~20 s) and shellcheck is clean. The tests cover rendering at the drawn points, anchored strokes, typed text, empty pages, SVG, the three selection rules, a folder named Wishes, deleted, blank and trashed pages, second scans, revisions, `index.json`, rmfakecloud trees in schema 3 and 4 with both index naming schemes, the `--user` filter, a half-written blob (exit 1), highlighter, pages longer than the screen, and the CLI.
 - **Mutation check:** 17 mutations on a scratch copy, each one alone: no centring, no text anchors, no anchor x, no blob hash check, no tree hash for indexes, no state, deleted pages kept, no page tags, no notebook tag, no folder walk, no trash check, v4 header not skipped, blank pages emitted, no revision bump, case-sensitive tags, errors not caught, page order ignored. Every one makes a test fail. The first run missed "blank pages emitted", so `test_erased_page_is_skipped_until_written_again` was added.
-- **`make proof` against real rmfakecloud: PASS 10**, with both `HASH_SCHEMA_VERSION=3` and `=4`. It runs rmfakecloud 3c6de006 from `pp-server:local` on 127.0.0.1:3094, creates a user, logs in through `/ui/api/login`, uploads both notebooks as `.rmdoc` through `/ui/api/documents/upload`, and checks that `/ui/api/documents` lists both. Then it scans rmfakecloud's DATADIR. Result: the same 3 pages with the same sha256 as scanning the xochitl folder, PNGs at 1404x1872, and a second scan with nothing new. Teardown leaves no `pp-wishes-*` container. The first run caught a real bug: index blobs are not named by their own sha256 (see Format facts).
+- **`make proof` against real rmfakecloud: PASS 10**, with both `HASH_SCHEMA_VERSION=3` and `=4`. It runs rmfakecloud 3c6de006 from `pp-server:local` on 127.0.0.1:3194 (3094 then; moved off the device test bed's port), creates a user, logs in through `/ui/api/login`, uploads both notebooks as `.rmdoc` through `/ui/api/documents/upload`, and checks that `/ui/api/documents` lists both. Then it scans rmfakecloud's DATADIR. Result: the same 3 pages with the same sha256 as scanning the xochitl folder, PNGs at 1404x1872, and a second scan with nothing new. Teardown leaves no `pp-wishes-*` container. The first run caught a real bug: index blobs are not named by their own sha256 (see Format facts).
 - **Live in the emulator** (`make emu`, which is `ppemu pull` then scan): first 3 new; then nothing new; tagging Notebook p2 `wish` on the tablet gave 1 new (`notebook-p2`); drawing a star on Wishes p2 gave `wishes-p2-f12412d5-r2` with `previous` set. Adding an empty page 3 to Wishes gave "1 blank" and no folder.
 - In a `python:3.13-slim-trixie` container (Debian 13.7, Python 3.13.17), `pip install rmscene==0.8.0 pillow==13.0.0` and then a scan of the fixtures gave the same 3 wishes. site-packages is 35 MB.
 - Without the libraries, `python3 wishes.py render …` prints `run make venv` and exits 1.
 
 ### Not verified
 
-- **Real tablet sync.** The proof fills rmfakecloud through its `.rmdoc` upload, which writes the tree with rmfakecloud's own code. A tablet writes through sync v3 PUTs from rm-sync. The tree format is the same by design, and the code accepts index blobs named either way, but no tablet or emulator rm-sync has synced here (the emulator has no network or sync).
-- When the tablet syncs a page (on close, or periodically while open), so how fresh a wish is.
-- Running on the server: no Python in `pp-server`, no ppd route, no schedule, no scheduled task for Claude.
+- **The real tablet.** Real rm-sync has only run in the emulator (`test/e2e`), and the server's own scan has only seen our stand-in upload.
+- When the tablet syncs a page: in the emulator, about 6 s after closing the notebook (`test/e2e`); while it stays open, unknown. Add up to 15 minutes for the scan.
+- A scheduled Claude task that picks wishes up and files issues: none exists, by design for now. Nothing here posts to GitHub.
 - Highlighter, shader, eraser and colours on real pages: only synthetic strokes. Eraser strokes are painted white; whether 3.27 still stores erase-area strokes is unknown.
 - Paper sizes other than 1404x1872. `paper_size` is read, so a Paper Pro page (1620x2160) should work, but none was tried.
 - Claude transcribing real handwriting. The test pages use block capitals drawn by script.
@@ -113,8 +132,9 @@ Claude reading `page.png` needs none of that, and it also reads sketches, arrows
 ### Open questions for Cedar
 
 - **Public issues.** The repo is public, so an issue made from a wish is public. Post the transcription only (the plan), keep wishes in a private tracker, or keep the repo private?
-- **Where it runs.** Server-side scan plus a read-only `/pp/wishes/` for the `pp-claude` token (recommended), at about 35 MB plus Python in the image. OK, or rather run it elsewhere?
+- **Where it runs:** built as recommended, on the server, with `/pp/wishes/` for Claude's read token only. It costs about 78 MB of image. OK?
+- **Pick-up:** a daily scheduled Claude task that fetches the inbox and files new wishes as issues, or only when Cedar says "new wish"?
 - **Which marker:** the Wishes notebook, the `wish` page tag, or both (both work now)? Fewer rules is simpler; I'd keep both, since they cost 3 lines.
 - **Revisions.** Writing more on a picked-up page makes `-r2`, and Claude updates the same issue. Or should a page be frozen once picked up, with new wishes going on a new page?
 - **Fixtures.** `testdata/` holds notebooks drawn in the emulator: our strokes in xochitl's format, no reMarkable code. OK to keep in the repo?
-- **Emulator state.** "Wishes" (3 pages) and "Notebook" (2 pages) are left on the shared emulator (`pp-emu-home`) so `make emu` has something to scan. Wipe them with `ppemu reset` if they get in the way.
+- **Emulator state.** "Wishes" and "Notebook" were left on the shared emulator for `make emu`; `test/e2e` resets it, so they are gone. `make emu` finds wishes again once one is written there.
