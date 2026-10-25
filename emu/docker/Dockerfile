@@ -12,15 +12,21 @@ RUN cd /src && \
     gcc -O2 -Wall -shared -fPIC -I/usr/include/p11-kit-1 -o /rmemu-pkcs11.so shim/pkcs11/*.c -lcrypto && \
     gcc -O2 -Wall -o /rmemud daemon/rmemud.c
 
+FROM ${ROOTFS} AS stock
+
 FROM ${ROOTFS}
 COPY --from=build /rmemu-shim.so /rmemu-pkcs11.so /rmemud /opt/rmemu/
 COPY docker/root/ /opt/rmemu/root/
-COPY docker/entrypoint.sh /opt/rmemu/entrypoint.sh
-COPY docker/bin/ /usr/local/bin/
+COPY docker/units/ /opt/rmemu/units/
+COPY docker/boot.sh /opt/rmemu/boot.sh
+# The stock files docker hides under its own bind mounts (boot.sh restores them).
+COPY --from=stock /etc/hosts /etc/hostname /opt/rmemu/stock/
 # Every process (including SSH sessions, which get a fresh environment) sees
 # the fake hardware, like a shell on the real device. Blank root password for
 # the container-only SSH server.
 RUN echo /opt/rmemu/rmemu-shim.so > /etc/ld.so.preload && \
     sed -i 's/^root:[^:]*:/root::/' /etc/shadow
 EXPOSE 22 8888
-ENTRYPOINT ["/bin/sh", "/opt/rmemu/entrypoint.sh"]
+# systemd halts on SIGRTMIN+3 (docker stop = shut down cleanly).
+STOPSIGNAL SIGRTMIN+3
+ENTRYPOINT ["/bin/sh", "/opt/rmemu/boot.sh"]

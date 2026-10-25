@@ -1,0 +1,12 @@
+# Emulator only: SSH on the container's network, served by the stock
+# per-connection dropbear@.service (same host key, same developer-mode
+# check). The tablet listens on usb0 (dropbear-usb0.socket) instead.
+[Unit]
+Description=SSH (emulator network)
+
+[Socket]
+ListenStream=22
+Accept=yes
+
+[Install]
+WantedBy=sockets.target

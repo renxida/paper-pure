@@ -1,0 +1,15 @@
+# Emulator only: the hardware hub (fake input devices, display relay, the
+# host's connection on :8888). Up before anything that talks to "hardware".
+[Unit]
+Description=Emulator hardware hub (rmemud)
+DefaultDependencies=no
+Before=xochitl.service marker-manager.service
+
+[Service]
+ExecStart=/opt/rmemu/rmemud
+ExecStartPost=/bin/sh -c 'while [ ! -S /run/rmemu/input.sock ]; do sleep 0.1; done'
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target
