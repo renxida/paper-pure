@@ -82,7 +82,7 @@ Nothing here touches xochitl, its unit, the pen or display stack. We stop update
 
 The test bed (`test/testbed/`) is the real 3.27.2.2 root fs running its own systemd 255 as PID 1 in a container, laid out like the tablet: `/` read-only, `/etc` overlaid by the image's own `var-volatile-etc.service`, `/etc/dropbear` bound from `/home` by the stock `etc-dropbear.mount`, the stock dropbear behind the stock developer-mode check, persistent `/home` and `/data` volumes, and a fake boot ROM counter (`lpgpr`) that survives reboots. A reboot is the container stopping and starting. Differences from the tablet: xochitl is a stand-in that pets the watchdog; memfaultd and systemd-resolved can't run there; hardware units are masked in `/run` only.
 
-`PP_SLOW=1 device/test/run.sh <extracted 3.27.2.2 rootfs>`: **48 passed, 0 failed**, about 25 minutes (the fast part, scenarios 1 to 7, about 6 minutes). What it shows:
+`PP_SLOW=1 device/test/run.sh <extracted 3.27.2.2 rootfs>`: **48 passed, 0 failed**, about 25 minutes. Re-run without `PP_SLOW` on the final files: **44 passed, 0 failed**, about 7 minutes, and it leaves no container or volume behind. What it shows:
 
 1. On a stock test bed, `--verify` exits 1, flags the unmasked units and the missing hosts block, and changes nothing. Stock memfaultd starts.
 2. `install` exits 0 and ends with every check PASS; a fresh key-only SSH connection works; `/` is read-only again; no bind mount is left; `/etc/dropbear` is still mounted; `device.cloud.remarkable.com` resolves to `0.0.0.0` (busybox `wget` prints the address); the stock hosts lines are kept.
