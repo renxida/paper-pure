@@ -1,0 +1,15 @@
+# paper-pure freeze start
+# OS updates stay off: these names resolve to nowhere. Managed by
+# /home/root/paper-pure/device/pp-device.sh; edit device/tablet/freeze.hosts
+# in the repo, not here.
+# memfaultd base_url; memfaultd also writes it into swupdate's suricatta
+# config, so this is where OTA checks and downloads start.
+0.0.0.0 device.cloud.remarkable.com
+# memfaultd's built-in default server, if its config ever falls back.
+0.0.0.0 device.memfault.com
+# MDM agent: an enrolled policy can force automatic updates.
+0.0.0.0 enterprise.cloud.remarkable.com
+# Where the public .swu images live. Not referenced on the tablet; blocked in
+# case an update server ever hands out its URLs.
+0.0.0.0 remarkable-software.s3.us-east-2.amazonaws.com
+# paper-pure freeze end

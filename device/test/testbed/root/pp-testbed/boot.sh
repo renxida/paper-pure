@@ -40,8 +40,8 @@ printf 'reMarkable Tatsu\0' > /sys/firmware/devicetree/base/model
     echo off > $STATE/lpgpr/facmode
 }
 part=$(cat $STATE/lpgpr/root_part)
-n=$(( $(cat $STATE/lpgpr/root${part}_errcnt) + 1 ))
-echo $n > $STATE/lpgpr/root${part}_errcnt
+n=$(( $(cat "$STATE/lpgpr/root${part}_errcnt") + 1 ))
+echo $n > "$STATE/lpgpr/root${part}_errcnt"
 echo "pp-testbed SPL: root $part (ecnt = $n)" > /dev/console 2>/dev/null || true
 echo "$(date +%s) boot part=$part ecnt=$n" >> $STATE/boots.log
 if [ "$n" -gt "$SPL_MAX" ]; then
