@@ -155,7 +155,7 @@ Verified (Oct 25, 2026, in the dev container):
   - `pp-proxy` on the real 3.27.2.2 tatsu userland passes 18 checks (see its README).
   - Backup drill: the entrypoint's nightly loop, scheduled two minutes out, fires on time and backs up as `pp` to a local restic repo. A manual `backup.sh` from a root shell re-runs itself as `pp`, so no repo file is root-owned. Sunday's `restic check` reported no errors. The repo holds neither the user's email nor the file name in plaintext. The data volume is deleted and a fresh server starts with no users and no status. `restore.sh latest` and a restart bring every file back identical (sha256 of all 15). Then the same password logs in, the PDF is listed, the tablet status and the feed are back, the paired tablet's old token still reads the same sync root, and the agent reports again. Restored files are owned by `pp`.
   - Teardown leaves no containers and no volumes.
-- The container stops cleanly on `docker stop` in 0.2 s, exit 0. A bad `TUNNEL_TOKEN` stops the whole container (exit 1) instead of running half up. Idle memory is about 11 MiB without cloudflared.
+- The container stops cleanly on `docker stop` in 0.2 s, exit 0. A bad `TUNNEL_TOKEN` stops the whole container (exit 1) instead of running half up, and a bad `BACKUP_AT` refuses to start (exit 1) instead of silently skipping backups. Idle memory is about 11 MiB without cloudflared.
 - `systemd-analyze verify` on `tablet-proxy/pp-proxy.service` against the tatsu systemd tree: clean.
 - `render.yaml` parses. Its field names match those in Render's own CLI source (`render-oss/cli`).
 
