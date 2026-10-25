@@ -69,7 +69,7 @@ for u in systemd-udevd.service systemd-udevd-control.socket systemd-udevd-kernel
          remarkable-enable-slumber.timer run-postinsts.service systemd-journald-audit.socket \
          sys-kernel-debug.mount sys-kernel-tracing.mount sys-kernel-config.mount \
          sys-fs-fuse-connections.mount dev-hugepages.mount boot-reason-check.service \
-         boot-reason-check-shutdown.service systemd-logind.service; do
+         boot-reason-check-shutdown.service; do
     ln -sf /dev/null /run/systemd/system/$u
 done
 
@@ -94,6 +94,15 @@ sed 's/^Description=.*/Description=SSH (test bed)/' /usr/lib/systemd/system/drop
 mkdir -p /run/systemd/system/dropbear-pptest@.service.d /run/systemd/system/sockets.target.wants
 cp /usr/lib/systemd/system/dropbear@.service.d/override.conf /run/systemd/system/dropbear-pptest@.service.d/
 ln -sf ../dropbear-pptest.socket /run/systemd/system/sockets.target.wants/dropbear-pptest.socket
+
+# Docker bind-mounts its own hosts, hostname and resolv.conf over /etc, and
+# leaves empty placeholder files in the container layer underneath. The
+# tablet has real ones there; put back stand-ins (ours, not the stock files).
+mount -o remount,rw /
+for f in hosts hostname resolv.conf; do umount "/etc/$f" 2>/dev/null || true; done
+[ -s /etc/hosts ] || printf '127.0.0.1\tlocalhost\n::1\tlocalhost\n127.0.1.1\timx93-tatsu\n' > /etc/hosts
+[ -s /etc/hostname ] || echo imx93-tatsu > /etc/hostname
+[ -L /etc/resolv.conf ] || { rm -f /etc/resolv.conf; ln -s /etc/resolv-conf.systemd /etc/resolv.conf; }
 
 mount -o remount,ro /
 export container=docker

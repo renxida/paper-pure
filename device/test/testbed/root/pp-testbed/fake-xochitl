@@ -1,8 +1,9 @@
 #!/bin/sh
 # Stand-in for xochitl in the test bed: stays up and pets the stock unit's
-# 60 s watchdog. Touch /home/root/pp-testbed-crash-xochitl to make it crash
-# right away instead (for boot-loop tests).
-if [ -e /home/root/pp-testbed-crash-xochitl ]; then sleep 2; exit 1; fi
+# 60 s watchdog. If /run/pp-testbed-crash (this boot) or
+# /home/root/pp-testbed-crash-xochitl (every boot) exists, it exits 1 after
+# 2 s instead (boot-loop tests).
+if [ -e /home/root/pp-testbed-crash-xochitl ] || [ -e /run/pp-testbed-crash ]; then sleep 2; exit 1; fi
 while :; do
     systemd-notify WATCHDOG=1
     sleep 20

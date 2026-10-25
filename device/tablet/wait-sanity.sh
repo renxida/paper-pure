@@ -9,12 +9,13 @@
 # with none of our freeze on it. So mods wait until the count is cleared.
 #
 # Exit 0: rm-sanity has run this boot and the count is 0, go ahead.
-# Exit 1: it hasn't after 5 minutes; mods stay off this boot (stock UI).
+# Exit 1: it hasn't after 5 minutes (PP_SANITY_WAIT); mods stay off this boot.
 L=/sys/devices/platform/lpgpr
 [ -r "$L/root_part" ] || exit 0   # not a real tablet (emulator): nothing to wait for
 part=$(cat "$L/root_part")
+max=${PP_SANITY_WAIT:-300}
 waited=0
-while [ "$waited" -lt 300 ]; do
+while [ "$waited" -lt "$max" ]; do
     ran=$(systemctl show -P ExecMainExitTimestampMonotonic rm-sanity.service 2>/dev/null)
     cnt=$(cat "$L/root${part}_errcnt" 2>/dev/null)
     if [ -n "$ran" ] && [ "$ran" != 0 ] && [ "$cnt" = 0 ]; then

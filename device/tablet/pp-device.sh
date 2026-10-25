@@ -23,13 +23,14 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 DEV=$PP/device
 STOCK=$DEV/stock            # stock copy of every root fs path we changed
 MANAGED=$DEV/managed.list   # the paths we manage, in the order we took them
-XCONF=/home/root/.config/remarkable/xochitl.conf
 LPGPR=/sys/devices/platform/lpgpr
 WIFI_SSH_MARKER=/data/internal/rm_enable_ssh_wifi_marker
 SYSD=/etc/systemd/system
 BIND=/run/pp-device/root
 # The OS update path: xochitl -> update-engine (D-Bus no.remarkable.update1)
-# -> swupdate (socket-activated, suricatta) whose server config memfaultd writes.
+# -> swupdate (socket-activated, suricatta) whose server config memfaultd
+# writes. xochitl's Settings > General > Software > Updates switch enables
+# or disables update-engine.service; masked, it stays off.
 # memfault-attributes only feeds memfaultd; masked so it doesn't fail every boot.
 UPDATE_UNITS="swupdate.service swupdate.socket update-engine.service memfaultd.service memfault-attributes.service"
 # Root SSH on wlan0. Stock keeps it off unless the marker exists; masked, even
@@ -68,7 +69,9 @@ real_close() {
     [ -n "$REAL_OPEN" ] || return 0
     sync
     if [ -n "$REAL" ] && mountpoint -q "$BIND"; then umount "$BIND" || say WARN "could not unmount $BIND"; fi
-    if [ -n "$ROOT_WAS_RO" ]; then
+    if [ -n "$ROOT_WAS_RO" ] && ! mount -o remount,ro / 2> /dev/null; then
+        # EBUSY: an unlinked inode is still cached. Drop clean caches, retry.
+        echo 2 > /proc/sys/vm/drop_caches 2> /dev/null || true
         mount -o remount,ro / || say WARN "/ stays read-write until the next reboot"
     fi
     REAL="" REAL_OPEN="" ROOT_WAS_RO=""
@@ -87,12 +90,15 @@ backup_once() {
     echo "$p" >> "$MANAGED"
 }
 views() { if [ -n "$REAL" ]; then echo "/ $REAL/"; else echo "/"; fi; }
-write_file() { # src dst mode: atomic if we can, in place if dst is a bind mount
+write_file() { # src dst mode
+    # An existing file is rewritten in place, never replaced: replacing would
+    # unlink the old inode, the /etc overlay can hold it, and then
+    # `mount -o remount,ro /` fails with EBUSY until reboot. In place also
+    # works for a file that is itself a bind mount (/etc/hosts in docker).
     mkdir -p "$(dirname "$2")"
     if [ -L "$2" ] || [ -d "$2" ]; then rm -rf "$2"; fi
-    if cp "$1" "$2.pp-new" 2>/dev/null && chmod "$3" "$2.pp-new" && mv -f "$2.pp-new" "$2" 2>/dev/null; then return 0; fi
-    rm -f "$2.pp-new"
-    cat "$1" > "$2" && chmod "$3" "$2"
+    cat "$1" > "$2"
+    chmod "$3" "$2"
 }
 same_file() { [ -f "$2" ] && [ ! -L "$2" ] && cmp -s "$1" "$2" && [ "$(stat -c %a "$2")" = "${3#0}" ]; }
 set_file() { # path src mode
@@ -116,9 +122,10 @@ set_link() { # path target
     if [ $n = 1 ]; then chg "$p -> $2"; fi
 }
 # /etc/hosts holds blocks from several owners; each sits between
-# "# NAME start" and "# NAME end". Replace ours in both views, keep the rest.
+# a line starting "# NAME start" and the line "# NAME end". Replace one
+# block in both views, keep everything else.
 hosts_with_block() { # file name blockfile -> stdout
-    sed "/^# $2 start\$/,/^# $2 end\$/d" "$1"
+    sed "/^# $2 start/,/^# $2 end\$/d" "$1"
     [ -s "$3" ] && cat "$3"
     return 0
 }
@@ -153,11 +160,14 @@ persist_path() { # copy live state of one path into the real root fs
     chg "$p (persisted)"
 }
 restore_path() { # put one path back to stock in both views
-    local p=$1 v
+    local p=$1 v d
     for v in $(views); do
-        rm -rf "$v${p#/}"
-        if [ -e "$STOCK$p" ] || [ -L "$STOCK$p" ]; then
-            mkdir -p "$(dirname "$v${p#/}")"; cp -a "$STOCK$p" "$v${p#/}"
+        d="$v${p#/}"
+        if [ -f "$STOCK$p" ] && [ ! -L "$STOCK$p" ] && [ -f "$d" ] && [ ! -L "$d" ]; then
+            cat "$STOCK$p" > "$d"; chmod "$(stat -c %a "$STOCK$p")" "$d"
+        else
+            rm -rf "$d"
+            if [ -e "$STOCK$p" ] || [ -L "$STOCK$p" ]; then mkdir -p "$(dirname "$d")"; cp -a "$STOCK$p" "$d"; fi
         fi
     done
     if [ -f "$MANAGED" ]; then grep -vxF -- "$p" "$MANAGED" > "$MANAGED.new" || true; mv -f "$MANAGED.new" "$MANAGED"; fi
@@ -189,10 +199,14 @@ preflight() { # strict before install; reports only in verify
         local sb swu
         sb=$(cat "$LPGPR/secboot" 2>/dev/null || echo "?")
         if [ "$sb" = unlocked ]; then pass "developer mode (secboot=unlocked)"; else fail "developer mode is off (secboot=$sb)"; fi
-        swu=$(cat "$LPGPR/swu_status" 2>/dev/null || echo "?")
-        if [ "$swu" = 0 ]; then pass "no OS update staged (swu_status=0)"
-        else fail "swu_status=$swu: an OS update was installed or interrupted (1 installed, 3 failed, 7 in progress)"; fi
-        slot_checks
+        if [ -r "$LPGPR/swu_status" ]; then
+            swu=$(cat "$LPGPR/swu_status")
+            if [ "$swu" = 0 ]; then pass "no OS update staged (swu_status=0)"
+            else fail "swu_status=$swu: an OS update was installed or interrupted (1 installed, 3 failed, 7 in progress)"; fi
+        else
+            info "swu_status not readable here"
+        fi
+        [ -r "$LPGPR/root_part" ] && slot_checks
     else
         info "no $LPGPR: not a real tablet (emulator or test bed), slot checks skipped"
     fi
@@ -250,19 +264,6 @@ resolves_to() { # name -> address the C library returns (via busybox wget's mess
 }
 
 # ---------------------------------------------------------------- install
-step_autoupdate() {
-    if [ -f "$XCONF" ] && grep -q '^AutoUpdate=false$' "$XCONF"; then return 0; fi
-    # xochitl rewrites its settings on exit, so edit them while it is stopped.
-    local was=""
-    if pidof xochitl > /dev/null; then was=1; systemctl stop xochitl.service; fi
-    mkdir -p "$(dirname "$XCONF")"
-    [ -f "$XCONF" ] || printf '[General]\n' > "$XCONF"
-    if grep -q '^AutoUpdate=' "$XCONF"; then sed -i 's/^AutoUpdate=.*/AutoUpdate=false/' "$XCONF"
-    elif grep -q '^\[General\]$' "$XCONF"; then sed -i '/^\[General\]$/a AutoUpdate=false' "$XCONF"
-    else printf '[General]\nAutoUpdate=false\n' >> "$XCONF"; fi
-    chg "$XCONF: AutoUpdate=false"
-    if [ -n "$was" ]; then systemctl reset-failed xochitl.service 2>/dev/null || true; systemctl start xochitl.service; fi
-}
 step_files() { # our own helpers, kept on /home (persistent)
     if [ "$HERE" != "$DEV" ]; then
         mkdir -p "$DEV"
@@ -320,7 +321,6 @@ cmd_install() {
         [ -f "$SYSD/pp-agent.timer" ] && systemctl start pp-agent.timer
         [ -f "$SYSD/pp-proxy.service" ] && { systemctl is-active -q pp-proxy.service || systemctl start pp-proxy.service; }
     fi
-    step_autoupdate
     echo
     FAILS=0
     cmd_verify
@@ -331,11 +331,17 @@ cmd_verify() {
     preflight verify
     real_open ro
     local u n a
-    # Freeze, by setting.
-    if [ -f "$XCONF" ] && grep -q '^AutoUpdate=false$' "$XCONF"; then pass "setting: AutoUpdate=false in xochitl.conf"
-    else fail "setting: automatic updates are not off in $XCONF"; fi
-    # Freeze, by unit masks.
+    # Freeze, by setting and by unit. The Settings > General > Software >
+    # Updates switch is update-engine.service itself: xochitl enables, starts,
+    # stops and disables that unit over systemd's D-Bus API and shows the
+    # switch on only when the unit is "enabled". Masked, it reads off and
+    # can't be switched on.
     for u in $UPDATE_UNITS; do check_link "$SYSD/$u" /dev/null "masked: $u"; check_inactive "$u"; done
+    if have_systemd; then
+        u=$(systemctl is-enabled update-engine.service 2>/dev/null || true)
+        if [ "$u" = masked ]; then pass "setting: Updates switch is off for good (update-engine.service is $u)"
+        else fail "setting: update-engine.service is '$u', so the Updates switch can turn on"; fi
+    fi
     # Freeze, by network block.
     check_hosts_block "paper-pure freeze" "$HERE/freeze.hosts"
     while read -r n; do
@@ -376,7 +382,7 @@ cmd_verify() {
 check_hosts_block() { # name blockfile
     local v ok=1 got
     for v in $(views); do
-        got=$(sed -n "/^# $1 start\$/,/^# $1 end\$/p" "${v}etc/hosts")
+        got=$(sed -n "/^# $1 start/,/^# $1 end\$/p" "${v}etc/hosts")
         [ "$got" = "$(cat "$2")" ] || ok=0
     done
     if [ $ok = 1 ]; then pass "/etc/hosts block '$1' (live and root fs)"; else fail "/etc/hosts block '$1' missing or stale (live or root fs)"; fi
@@ -404,7 +410,7 @@ cmd_uninstall() {
     have_systemd && systemctl daemon-reload
     rm -f "$MANAGED"
     info "root fs is stock again. Update units come back at the next reboot."
-    info "AutoUpdate=false is left as is; turn automatic updates on in Settings if you want them."
+    info "the Updates switch in Settings works again after the next reboot."
 }
 
 main() {
