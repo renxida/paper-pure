@@ -8,6 +8,7 @@
 // rmemud -> shim: 'R' = resend the whole screen (a new viewer joined).
 #include "common.h"
 #include "devices.h"
+#include <errno.h>
 #include <poll.h>
 #include <pthread.h>
 #include <stdlib.h>
@@ -188,7 +189,11 @@ static void found_screen(const void *data, long bpl, int fmt) {
 // xochitl's epaper renderer paints the whole UI into a full-screen QImage
 // wrapped around SWTCON-owned memory; SWTCON diffs it into waveform phases.
 // Grab it as it's constructed. (Other full-screen QImages, e.g. the boot
-// splash pixmap, are transient.)
+// splash pixmap, are transient.) Not one with a cleanup function: xochitl
+// renders PDF pages at screen size into pdfium bitmaps wrapped that way, and
+// frees them right after. Taking one showed the PDF page as the screen, then
+// crashed xochitl in the scanner, whenever it rendered a PDF page. And
+// only in xochitl itself: helpers that load the shim don't drive the panel.
 void _ZN6QImageC1EPhiixNS_6FormatEPFvPvES2_(void *self, unsigned char *data, int w, int h, long long bpl, int fmt,
                                              void (*cleanup)(void *), void *info) {
     static void (*real)(void *, unsigned char *, int, int, long long, int, void (*)(void *), void *);
@@ -197,7 +202,9 @@ void _ZN6QImageC1EPhiixNS_6FormatEPFvPvES2_(void *self, unsigned char *data, int
     if (w >= 1000 && h >= 1000) TRACE("fb: QImage(data) %dx%d bpl=%lld fmt=%d", w, h, bpl, fmt);
     static int pick = -1;
     if (pick < 0) pick = getenv("RMEMU_FB_FORMAT") ? atoi(getenv("RMEMU_FB_FORMAT")) : 4;
-    if (w == W && h == H && fmt_bpp(fmt) && (!pick || fmt == pick)) found_screen(data, (long)bpl, fmt);
+    if (w == W && h == H && fmt_bpp(fmt) && (!pick || fmt == pick) && !cleanup &&
+        !strcmp(program_invocation_short_name, "xochitl"))
+        found_screen(data, (long)bpl, fmt);
 }
 
 // SWTCON mallocs the screen buffer and frees it when xochitl exits. Let the

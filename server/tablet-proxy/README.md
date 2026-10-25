@@ -67,6 +67,8 @@ Persisting uses the same trick rmfakecloud-proxy's installer uses on Ferrari, Ch
 
 ## Status
 
+Verified in the emulator by `test/e2e` (Oct 25, 2026): `device/install.sh --proxy` (runtime install, then persisted by `pp-device.sh`), then the stock 3.27.2.2 UI paired with the code from rmfakecloud's web API and synced both ways. Every request pp-proxy saw, all 2xx, all on the list: `internal.cloud.remarkable.com` `/discovery/v1/endpoints`, `/integrations/v2/instances`; `local.appspot.com` (from discovery) `/token/json/2/device/new`, `/token/json/2/user/new`; `eu.tectonic.remarkable.com` `/sync/v4/root` (GET), `/sync/v3/root` (PUT), `/sync/v3/files/<hash>` (GET, PUT), `/sync/reports/v1`, `/report/v1`, the `/notifications/ws/json/1` websocket (a server-side upload reached the device within a second); `ping.remarkable.com` `/analytics/v2/events` (rmfakecloud swallows them). rm-sync uses Qt's HTTP backend (`UseCurlHttpBackend=false`) and trusts the CA from the bundle. It survived a reboot (persisted unit, hosts block and CA).
+
 Verified (Oct 25, 2026, dev container):
 
 - `go test -race ./tablet-proxy` passes. It covers: the cert verifies for all 13 names and for nothing else; with the CA key in hand, a cert for `pp.example.org`, `remarkable.com` or a look-alike fails with a name-constraint error; gencert writes exactly 3 files, the key 0600, no CA key, and refuses to overwrite; `agent.json` parsing (upstream from `feed_url`, unknown fields ignored); a PUT through real TLS reaches the upstream with the Access headers set, a client-forged `CF-Access-Client-Secret` replaced, the device's own `Authorization` kept, and `Host` set to the server; a foreign Host gets 421 and never reaches the upstream; a websocket upgrade passes through and carries data; the hosts block holds every name and no update host; the host's OpenSSL 3.0 agrees on all of this.
@@ -78,9 +80,9 @@ Verified (Oct 25, 2026, dev container):
 
 Not verified:
 
-- Anything on the real tablet: the persistent install (`remount,rw /` under dm-verity, `umount -R /etc`), real `xochitl` and `rm-sync` syncing through the proxy on 3.27.2.2, binding to :443.
+- Anything on the real tablet: the persistent install (`remount,rw /` under dm-verity, `umount -R /etc`), binding to :443 there. Real `xochitl` and `rm-sync` on 3.27.2.2 do sync through it in the emulator (below).
 - Real Cloudflare: Access with a service token, the tunnel, websockets through it. The gate in the tests is a stand-in.
-- Whether 3.27.2.2 contacts a name outside the 13. If it does, that request goes to the real reMarkable host and fails; watch the `pp-proxy` and xochitl logs at first pairing.
+- Whether 3.27.2.2 contacts a name outside the 13 on the real tablet. In the emulator it didn't (below).
 - `install.sh` persistent mode and `--uninstall` (shellcheck only).
 
 Open questions for Cedar:

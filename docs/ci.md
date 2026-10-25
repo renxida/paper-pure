@@ -131,12 +131,18 @@ Verified:
   - Missing env, a bad URL shape, no Access token (403) and a wrong publish token (403) all fail.
   - With everything right, all five files are published and the served `latest.json` is byte-identical.
   - Against a server that answers every request with a 302 to a login page, `publish.sh` alone prints success for every file, and our readback says FAIL.
+- **`make proofs` passes on x86 under qemu:** 5 of 5, in a scratch copy, with no containers left behind.
+  - agent integration on the tatsu userland: 59 s.
+  - server proof: `PASS 59`, including pp-proxy on the tatsu userland. 134 s.
+  - wishes against rmfakecloud: 14 s.
+  - device test bed: `82 passed, 0 failed`, 31 min (qemu, while the shared emulator also ran).
 - **One rootfs import serves three names:** `pp-emu-rootfs` (debugfs import) and `pp-device-rootfs` (tar of the extracted tree) have the same 12178 entries with the same modes, owners and sizes. They also have the same sha256 for every file under `/etc` and `/usr/lib/systemd`, apart from docker's injected `/etc/hosts` and `/etc/hostname`.
 
 Not verified:
 
 - **Any real GitHub Actions run:** the arm64 runners, the cache, artifacts, the environment, or the notice and summary output.
-- **`make rung2`:** `test/e2e/run.sh` didn't exist when this was written.
-- **`make proofs` on arm64:** see below for the x86 run.
+- **`make rung2`:** not run by this lane, because `test/e2e/run.sh` resets the shared emulator. Its interface (`--skip-build`, `--keep`, `PP_E2E_OUT`) matches the Makefile and the workflow.
+- **`make proofs` on arm64,** and how long it takes there.
+- **The hello golden on GitHub's x86 hardware.** It is pixel-exact here; a different CPU could shift antialiasing.
 - **The `rootfs` target's import path on a fresh machine:** the images already existed here. `emu/tools/import-rootfs.sh` itself was proven by the emu lane.
 - **Publishing through real Cloudflare Access.**

@@ -125,7 +125,7 @@ Every one of these also goes in the password manager. None goes in the repo (`se
 
 ## Known limits
 
-- **rmfakecloud is tested up to OS 3.27.1, and the tablet runs 3.27.2.2.** The paths 3.27.2.2's `rm-sync` uses all exist in the pinned commit, but real sync on 3.27.2.2 has to be proven in the emulator first.
+- **rmfakecloud is tested upstream up to OS 3.27.1, and the tablet runs 3.27.2.2.** In the emulator, the stock 3.27.2.2 xochitl and rm-sync pair and sync both ways with the pinned commit through pp-proxy and a stand-in Access gate, unmodified (`test/e2e`, step `sync`). Still unproven on the real tablet.
 - **Cloudflare caps request bodies at 100 MB** on Free and Pro. A single file bigger than that (a huge PDF) can't upload through the tunnel.
 - **Backups read a live directory.** The tablet uploads blobs before it moves the root pointer, so a snapshot taken mid-sync can at worst miss the newest change. 03:17 is a quiet hour, and there are 14 dailies.
 - rmfakecloud always starts an MQTT listener on 8883 inside the container. Nothing can reach it: no port is published and the tunnel routes only to 3080.
@@ -162,7 +162,7 @@ Verified (Oct 25, 2026, in the dev container):
 Not verified:
 
 - Anything on real Cloudflare (tunnel, Access policies, service tokens, the 401 setting, websockets through the tunnel) or on Render (Blueprint, disk, BuildKit `ADD <git>` and `--mount=type=secret` in their builder, shell, log retention). No accounts were made.
-- Real sync from a real tablet or from the emulator's xochitl on 3.27.2.2.
+- Real sync from a real tablet. (From the emulator's stock xochitl on 3.27.2.2 it works: see `test/e2e/README.md`.)
 - restic against B2, and the no-`deleteFiles` key setup.
 - The persistent tablet install and `--uninstall`.
 - Restores of large data sets (the drill had 15 files).

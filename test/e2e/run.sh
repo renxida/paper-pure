@@ -52,7 +52,7 @@ ota:2400:0 killswitch:1200:0 reboot:1200:0 disable:600:0 status:300:0"
 log() { printf '%s %s\n' "$(date -u +%T)" "$*"; }
 ok() { log "ok: $*"; }
 die() { log "FAIL: $*"; exit 1; }
-has() { case "$2" in *"$3"*) ok "$1" ;; *) die "$1: no '$3' in: ${2:0:600}" ;; esac; }
+has() { case "$2" in *"$3"*) ok "$1: $3" ;; *) die "$1: no '$3' in: ${2:0:600}" ;; esac; }
 hasnt() { case "$2" in *"$3"*) die "$1: found '$3' in: ${2:0:600}" ;; *) ok "$1" ;; esac; }
 eq() { if [ "$2" = "$3" ]; then ok "$1 = $3"; else die "$1: got '$2', want '$3'"; fi; }
 jget() { python3 -I -c 'import json,sys; v=json.load(sys.stdin)
@@ -383,9 +383,10 @@ step_ota() {
     has "forged: refused" "$(jget last_error < "$W/agent-status.json")" "signature"
     eq "forged: not downloaded" "$(dev "ls $PP/releases $PP/downloads 2>/dev/null | grep -c $forged" || true)" 0
 
-    # 4. Tampered after signing (the tarball changed): refused.
+    # 4. Tampered after signing (one byte of the tarball flipped, same size): refused.
+    # (Bytes appended after the signed size are never read: the agent stops at "size".)
     pack "$W/keys/release.key.pem" "$(release_tree "$tampered")" "$tampered" "$OS"
-    printf 'x' >> "$W/feed/$tampered.tar.gz"
+    python3 -I -c 'import sys; b = bytearray(open(sys.argv[1], "rb").read()); b[len(b) // 2] ^= 0xff; open(sys.argv[1], "wb").write(b)' "$W/feed/$tampered.tar.gz"
     publish "$tampered"
     agent_update
     eq "tampered: current" "$(jget release < "$W/agent-status.json")" "$good"
