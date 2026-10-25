@@ -78,7 +78,7 @@ emu/bin/ppemu logs [-f]                  # console: the journal (xochitl, shim, 
 - **Network:** the device's `wlan0` is up with the default route (pp-agent's Wi-Fi gate passes with default config). The host is the bridge gateway, usually `172.17.0.1` (`ppemu status` prints it); serve test servers there or on `0.0.0.0`. No `host.docker.internal` inside. `/etc/hosts` edits work at once (systemd-resolved reads it; it answers `0.0.0.0` lines with "no address").
 - **Fake hardware at the real paths:** battery and charger (`/sys/class/power_supply/max77818_battery`, `max77818-charger`), `/sys/class/net/wlan0`, input names in `/sys/class/input`, `lpgpr`, `soc0`. Static binaries see them too. `/dev/input/event0..3` are FIFOs for programs without the shim; event0 is the power key (`44440000.bbnsm:pwrkey`).
 - Notebooks: `/home/root/.local/share/remarkable/xochitl/`. Settings: `/home/root/.config/remarkable/xochitl.conf`, `/data/xochitl.conf`.
-- Masked here (no hardware, or phone-home): udev, tee-supplicant, Wi-Fi/Bluetooth daemons, networkd, chronyd, memfaultd, crashuploader, mdm-agent. swupdate fails at start. `ppemu ssh systemctl --failed` shows only swupdate on a fresh device.
+- Masked here (no hardware, or phone-home): udev, tee-supplicant, Bluetooth, networkd, chronyd, memfaultd, crashuploader, mdm-agent. swupdate fails at start. `ppemu ssh systemctl --failed` shows only swupdate on a fresh device. Wi-Fi is a fake (`rmemu-wifi` as `wpa_supplicant.service` and `rmemu-network1.service`): xochitl sees one open network, `pp-emu`, connected while `wlan0` has the default route, so pairing and sync work.
 - The device shell is bash plus busybox: `head -n 3` (not `head -3`), no `od -A`, no python, no curl, no findmnt. Pull files out and inspect them on the host.
 - Input devices for apps reading evdev directly: event0 power key, event1 pen (ABS_X 0..14040, ABS_Y 0..18720, pressure 0..4095), event2 touch (MT, 0..1403 x 0..1871), event3 hall sensor. Pen/touch names and ranges are emulator guesses, not read off a Pure.
 
@@ -95,6 +95,10 @@ emu/bin/ppemu logs [-f]                  # console: the journal (xochitl, shim, 
 | Open notebook | close document, toolbar column x=56 | 1348,56 |
 | Notebook toolbar (x=56) | pen, 2nd pen, text, eraser, select, layers, undo, redo | y = 168, 280, 392, 504, 616, 728, 840, 952 |
 | Pen panel | Black, Gray, White, Blue, Red | 200,856; 312,856; 424,856; 200,968; 312,968 |
+| Settings > General | Account row (unpaired), Pair button on the Account page | 880,284; 1082,276 |
+| Settings > General | Software row: unpaired / paired (the Account row shrinks) | 880,568 / 880,444 |
+| Settings > Software | Updates switch (off = white at 1068..1080,460) | 1096,460 |
+| Pair page keyboard | rows y=1412 (q at x=138), 1536 (a at 200), 1660 (z at 326); 125 px per key | |
 
 Keep strokes at x > 600 while the pen panel is open, x > 150 otherwise. First visits show tooltips; close them (the X in the tooltip) before drawing. Check the colour in the pen panel before drawing: fresh notebooks started on black Pencil in our runs, but one early run drew highlighter yellow.
 
@@ -107,4 +111,4 @@ Keep strokes at x > 600 while the pen panel is open, x > 150 otherwise. First vi
 
 ## Not emulated
 
-E-ink refresh (no flash, no ghosting, instant final image), real pen latency, battery behaviour, real suspend, the Wi-Fi radio, Bluetooth, OTA, NFC, A/B slot switching. Sync runs (rm-sync) but needs a server you point it at. Screenshots are xochitl's RGB render; the real panel is grayscale. Don't report UI behaviour in those areas as real-device behaviour.
+E-ink refresh (no flash, no ghosting, instant final image), real pen latency, battery behaviour, real suspend, the Wi-Fi radio, Bluetooth, OTA, NFC, A/B slot switching. Sync works against a server you point it at (`test/e2e` pairs with rmfakecloud through pp-proxy). Screenshots are xochitl's RGB render; the real panel is grayscale. Don't report UI behaviour in those areas as real-device behaviour.

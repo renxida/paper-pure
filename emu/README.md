@@ -65,20 +65,22 @@ So the rest of the stack runs here unmodified. `docker/boot.sh` lays out the mou
 - **xochitl's stock unit and drop-in apply**, including `Restart=on-failure`, the start limit (4 in 10 min) and `OnFailure=emergency.target`, whose `rm-emergency.sh` reboots. Here that reboot stops the container; `ppemu start` boots it again. `ppemu restart` and `skip-setup` call `reset-failed` first, so a dev loop doesn't trip the start limit.
 - **Emulator-only units live in `/run/systemd/system`** (rebuilt each boot, so the root fs and `/etc` stay stock):
   - `rmemud.service`, the hardware hub; `dropbear.socket`, SSH on the container network through the stock `dropbear@.service` (the tablet listens on `usb0`).
-  - Masks: hardware the container doesn't have (udev, tee-supplicant, keystore and home crypto, zram, Wi-Fi and Bluetooth daemons, networkd, chronyd, getty, USB gadget) and reMarkable's phone-home daemons (`memfaultd`, `memfault-attributes`, `crashuploader`, `mdm-agent`). `swupdate` is left alone; it fails at start here (no memfaultd config).
+  - Masks: hardware the container doesn't have (udev, tee-supplicant, keystore and home crypto, zram, Bluetooth, networkd, chronyd, getty, USB gadget) and reMarkable's phone-home daemons (`memfaultd`, `memfault-attributes`, `crashuploader`, `mdm-agent`). `swupdate` is left alone; it fails at start here (no memfaultd config).
   - xochitl's stock drop-in minus `Requires=dev-dri-card0.device` (only udev would announce it).
+  - Wi-Fi as xochitl sees it: `wpa_supplicant.service` (stock unit, drop-in `ExecStart`) and `rmemu-network1.service` run `rmemu-wifi` (see Network).
   - Unit credentials reset (the container can't mount the credentials fs, and none are passed on the tablet either).
   - Under qemu-user only: xochitl's `WatchdogSec` 10 min instead of 60 s; its main thread can be busy for over a minute building a page.
 - **Fake hardware at the real paths.** `docker/root/sys` is bind-mounted over `/sys/class/{power_supply,hwmon,input}`, `/sys/devices/{platform/lpgpr,platform/suspend-event,soc0}`, `/sys/firmware/devicetree` and `/sys/power`, so static binaries (pp-agent) see it too. Only `/proc/device-tree` and `/sys/nfc` still need the shim.
   - `lpgpr`: slot `a`, `roota_errcnt` 1 at boot, which the stock `rm-sanity` zeroes 60 s in (no slot switching). `soc0/serial_number` is the machine-id, random per container.
   - `/dev/input/event0..3` are FIFOs fed by rmemud, for programs without the shim. The power key is `event0`, named `44440000.bbnsm:pwrkey` as in the image's `/etc/pm/sleep.wakesrc`.
-- **The shim leaves systemd alone**: PID 1, the `systemd-*` daemons and rmemud get no fakes (PID 1 aborted on them, logind crashed on a fake device monitor).
+- **The shim leaves systemd alone**: PID 1, the `systemd-*` daemons, rmemud and rmemu-wifi get no fakes (PID 1 aborted on them, logind crashed on a fake device monitor).
 - **Shutdown and reboot go through systemd.** `ppemu stop` is `systemctl poweroff`, `ppemu reboot` is `systemctl reboot` plus `start`. (docker stop's `SIGRTMIN+3` doesn't reach systemd under qemu-user.)
 - **Container flags this needs**: `--cap-add SYS_ADMIN`, seccomp and AppArmor unconfined, `--cgroupns host -v /sys/fs/cgroup:/sys/fs/cgroup:rw`, `--read-only`, `-t`. No `--privileged`, no `NET_ADMIN`. `bin/ppemu` passes them.
 
 ## Network
 
 - **`wlan0`** is the container's only interface, on docker's default bridge, up, with the default route: what pp-agent's Wi-Fi gate wants, with default config. `ppemu wifi off` disconnects it (flight mode: pp-agent says `no wlan0`). While it is off, the host can't reach the device either (no SSH, no screen); use `docker exec pp-emu-tablet ...`.
+- **Wi-Fi as xochitl sees it.** xochitl's csl wifi library asks wpa_supplicant over D-Bus (`fi.w1.wpa_supplicant1`: interface state, current network, `SignalPoll`) and networkd for `OnlineState`. There is no radio, and networkd can't start here (no `CAP_NET_ADMIN`; under qemu-user its netlink setup fails with "Protocol not supported"). The stock wpa_supplicant's `wired` driver does reach `completed` on the veth, but its `SignalPoll` fails, which the library reads as "disconnected". So `daemon/rmemu-wifi.c` answers both APIs: one open network, `pp-emu`, connected while `wlan0` has the default route. It runs as `wpa_supplicant.service` (the stock unit, so xochitl's own start/stop and the stock `csl.conf wifi = off` condition still apply) and as `rmemu-network1.service` (user `systemd-network`, as the stock D-Bus policy wants). Without it xochitl says "Pairing with the cloud requires a Wi-Fi connection" and rm-sync never syncs. `ppemu wifi off` makes both say disconnected/offline within 2 s.
 - **The host** is the bridge gateway, usually `172.17.0.1` (`ppemu status` says). A server on the host must listen there or on `0.0.0.0`. Example: `ppsign serve -dir FEED -addr 172.17.0.1:3191`, then `"feed_url": "http://172.17.0.1:3191/"` in the device's `agent.json`. `host.docker.internal` does not exist inside (docker's `/etc/hosts` is replaced by the tablet's).
 - **Names** resolve like on the tablet: glibc asks `systemd-resolved` (running), which reads `/etc/hosts`; docker's DNS servers stand in for DHCP's (from Claude's cloud dev containers, outside DNS doesn't answer at all). Edits to `/etc/hosts` work within a second and are gone at reboot unless persisted (`pp-device.sh persist /etc/hosts`). Note: resolved answers a `0.0.0.0` line with "no address" (NODATA), not with `0.0.0.0`. Static Go programs read `/etc/hosts` themselves.
 - To route the device's cloud traffic to a test server: point names at it in `/etc/hosts` (pp-proxy's `hosts` block does this for reMarkable's sync names, at `127.0.0.1`), and give pp-proxy/pp-agent the host address.
@@ -115,7 +117,7 @@ Additions in `shim/`, the first two for qemu-user:
 - **Top realtime signals.** qemu-user can't map guest signals 62 to 64 onto host signals, so blocking them silently does nothing and `sd_event_add_signal` returns EBUSY; xochitl aborts (`Failed to add SIGNO_PRE_AUTOSLEEP handler`). The shim listens on a spare signal instead. Those signals come from the suspend-event driver, which doesn't exist here.
 - **Busy main thread counts as activity.** Under qemu xochitl can compute for 10 to 60 s before it draws a new page (boot, Settings). The shim times how long xochitl's main thread has been out of `poll`/`ppoll` and the display scanner reports that as activity, so "wait until the screen settles" doesn't return halfway. Natively this just makes waits a little more honest.
 - **freopen.** busybox `hexdump` opens files with `freopen`, which upstream didn't hook, so `hexdump /proc/device-tree/...` saw nothing. Now the device shell sees the same fake tree as xochitl.
-- **Hands off systemd** (`hooks.c`): no fakes in PID 1, `systemd-*` and rmemud.
+- **Hands off systemd** (`hooks.c`): no fakes in PID 1, `systemd-*`, rmemud and rmemu-wifi.
 - **Screen capture lets go before the free** (`fb.c`): the scanner thread kept reading SWTCON's screen buffer after xochitl freed it on exit, and xochitl segfaulted on many stops (3 of 4 pp-agent install/rollback restarts here). Upstream has the same race; with a shell loop nobody saw it. Under systemd each one is a failure, and `OnFailure=emergency.target` rebooted the "tablet". The shim now hooks `free()` for that one buffer.
 - **Crashes say where** (`hooks.c`): a SIGSEGV/SIGBUS in a shimmed process logs the faulting code and its caller as `library(symbol+offset)` before the default action. That is how the race above was found.
 
@@ -132,7 +134,7 @@ What the emulator can't tell you. Test these on the tablet.
 - **Colour.** xochitl renders an RGB32 image; the real panel is grayscale. Highlighter/colour ink shows in colour in screenshots. A second 1404x1872 Grayscale8 buffer exists but stays empty here.
 - **Storage.** Settings shows the Docker host's disk (e.g. 228 GB of 252 GB), not a 32 GB tablet.
 - **Kernel.** `uname -r` shows the Docker host's kernel, not the tablet's `6.12.49+git-imx93-tatsu`; no kernel modules or drivers run.
-- **Not running at all:** the Wi-Fi radio (`wlan0` is a docker veth; wpa_supplicant and networkd are masked), Bluetooth, memfaultd, crashuploader, mdm-agent (masked: the emulator doesn't phone home), swupdate (fails at start), tee-supplicant (a software PKCS#11 token stands in for OP-TEE), chronyd, real orientation sensor, NFC (marker-manager talks to fake sysfs). rm-sync runs; it syncs nothing until pointed at a server.
+- **Not running at all:** the Wi-Fi radio (`wlan0` is a docker veth; `rmemu-wifi` answers for wpa_supplicant and networkd, so scanning, joining networks and signal strength are fakes), Bluetooth, memfaultd, crashuploader, mdm-agent (masked: the emulator doesn't phone home), swupdate (fails at start), tee-supplicant (a software PKCS#11 token stands in for OP-TEE), chronyd, real orientation sensor, NFC (marker-manager talks to fake sysfs). rm-sync syncs with whatever server you point it at (`test/e2e` pairs it with rmfakecloud through pp-proxy).
 - **Boot ROM.** No A/B slots: `lpgpr` is fake, the error count is 1 at each boot and rm-sanity clears it, nothing ever switches slot.
 
 ## Change the emulator
@@ -143,6 +145,15 @@ What the emulator can't tell you. Test these on the tablet.
 - Host side (`host/`, `bin/ppemu`) is plain Node with no dependencies.
 
 ## Status
+
+### Wi-Fi for xochitl (pp-e2e), Oct 25 2026
+
+Found by `test/e2e`: on the systemd emulator, Settings > General > Account > Pair said "Pairing with the cloud requires a Wi-Fi connection", and xochitl logged `[csl] ... wpa_supplicant has no configured interfaces` and `GetAll failed ... dbus-org.freedesktop.network1.service`. Tried first, by hand in the running emulator: the stock wpa_supplicant with `-D wired` (`COMPLETED` once `wlan0` had `allmulti` set from outside; without it `Failed to enable allmulti`, as there is no `CAP_NET_ADMIN`), but xochitl then logged `No response from wpa_supplicant, assuming we are disconnected` (its `SignalPoll` fails: `Failed to read signal`). networkd with its `ConditionCapability` cleared: `Could not set up manager: Protocol not supported`. Hence `rmemu-wifi`.
+
+- `emu/bin/ppemu rebuild` (5 min, with the new `libsystemd-dev` layer): `wpa_supplicant.service` and `rmemu-network1.service` active; `busctl get-property org.freedesktop.network1 ... OnlineState` → `online`; no `[csl]` wifi errors in xochitl's log; `systemctl --failed` still only `swupdate`.
+- Pairing then worked end to end through pp-proxy and rmfakecloud, and so did sync both ways (see `test/e2e/README.md`).
+
+Not verified: the Wi-Fi settings page (scan list, joining another network), `ppemu wifi off` with xochitl watching (the daemon follows the default route; checked only by reading the code path), an arm64 host.
 
 ### Fidelity pass: the image's own systemd (pp-emu-fidelity), Oct 25 2026
 

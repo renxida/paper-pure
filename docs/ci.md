@@ -54,7 +54,8 @@ Agents can't change these settings. Until they are on, CI is advice, not a gate.
    - Restrict deletions and block force pushes.
    - Require a pull request before merging. Zero approvals is fine while it's just Cedar and Claude.
    - Require status checks to pass, and add `rung1`, `proofs` and `rung2`. They can be picked once they have run once.
-   - Leave the bypass list empty.
+   - Keep `rung1` required. If it fails, `proofs` and `rung2` are skipped, and GitHub counts a skipped check as passed.
+   - Leave the bypass list empty. From then on, agents push to a branch and open a PR; nobody pushes to `main` directly.
 2. **Settings, Environments, `release`.** The first run on `main` creates it.
    - Deployment branches: `main` only.
    - The secrets below go here, not in repo secrets, so only this job on `main` ever sees them.

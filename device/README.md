@@ -27,7 +27,7 @@ Everything on 3.27.2.2 that can update the OS, found in the root fs:
 
 | Piece | What it does | How we stop it |
 | --- | --- | --- |
-| xochitl, Settings > General > Software > **Updates** | The switch *is* `update-engine.service`. xochitl enables, starts, stops and disables that unit over systemd's D-Bus API, and shows the switch on only when the unit is "enabled" (strings: `update-engine.service`, `update-engine status:`, `EnableUnitFiles`, `Error when enabling update engine!`). Seen in the emulator: switching it on calls out to enable the engine and does not touch `xochitl.conf` | Mask `update-engine.service`. The switch reads off and can't be turned on |
+| xochitl, Settings > General > Software > **Updates** | The switch *is* `update-engine.service`. xochitl enables, starts, stops and disables that unit over systemd's D-Bus API, and shows the switch on only when the unit is "enabled" (strings: `update-engine.service`, `update-engine status:`, `EnableUnitFiles`, `Error when enabling update engine!`). Seen in the emulator: switching it on calls out to enable the engine and does not touch `xochitl.conf` | Mask `update-engine.service`. The switch reads off; switching it on fails (`UnitMasked`), though it shows on until xochitl restarts |
 | `update-engine.service` | `fakeupdateengine_service`, D-Bus `no.remarkable.update1`. Talks to swupdate over its IPC socket (`swupdate-ipc`) | Masked |
 | `swupdate.service`, `swupdate.socket` | The installer. Suricatta mode with `-d` (no polling of its own, waits for IPC) and `-x` (no TLS verification!). Socket-activated on `/tmp/sockinstctrl` | Both masked |
 | `memfaultd.service` | Writes `/tmp/swupdate.cfg`, swupdate's server config, from its `base_url` `https://device.cloud.remarkable.com`; `swupdate.service` is `PartOf` it. Also telemetry | Masked, plus `memfault-attributes.service` so it doesn't fail every boot |
@@ -78,6 +78,15 @@ Nothing here touches xochitl, its unit, the pen or display stack. We stop update
 
 ## Status
 
+### Fixed by the e2e lane (Oct 25, 2026)
+
+`--verify` failed on the systemd emulator, and would on the tablet, with `device.cloud.remarkable.com resolves to '?', not 0.0.0.0` for all four blocked names. The tablet resolves through systemd-resolved (`hosts: resolve [!UNAVAIL=return] files` in `nsswitch.conf`), and resolved answers a `0.0.0.0` hosts line with "no address" (NODATA), not with `0.0.0.0`; the test bed has no resolved, so it never showed there. The check now also passes when `resolvectl query -t A` and `-t AAAA` both say `does not have any RR of the requested type`.
+
+- In the emulator after `install`: `PASS    resolves to no address (systemd-resolved, A and AAAA): device.cloud.remarkable.com` (and the other three), `pp-device: all checks passed`.
+- Negative: with the `device.memfault.com` line removed from the live `/etc/hosts`, `--verify` exits 1 with `device.memfault.com resolves to '?', not 0.0.0.0` (plus the stale-block and drift FAILs). An unblocked name gets `Name ... not found`, not NODATA, so it can't pass by accident.
+- AAAA lookups of the blocked names (unverified before) also return NODATA through resolved.
+- `test/e2e/run.sh` runs `--verify` after install and after a reboot.
+
 ### Verified: kill switch and crash loops (Oct 25, 2026, second pass)
 
 `PP_NAME=pp-killswitch-it PP_PORT=3194 device/test/run.sh <extracted 3.27.2.2 rootfs>`: **84 passed, 0 failed**, 27 minutes, on the final files (scenarios 1 to 7 as below, plus 9; it leaves no container or volume behind). Scenario 9 is the real arm64 `pp-agent` under the test bed's systemd 255, with `mods/release/hooks/*.sh` as shipped and upstream's `xovi/start` and `xovi/stock` at the pinned commit (stub hashtab, no `xovi.so`; the stand-in xochitl crashes when it runs with xovi preloaded and the live tree says so). The power key is a FIFO the agent reads; the test writes `struct input_event` records into it.
@@ -125,8 +134,8 @@ Also checked:
 ### Not verified
 
 - Anything on the real tablet. In particular: that `mount -o remount,rw /` works in developer mode on the Pure (u-boot env says no verity; remagic reports it on the Paper Pro family); the `drop_caches` retry when `remount,ro` hits EBUSY (never needed in the test bed after the in-place fix, and the container can't write `/proc/sys` anyway); `rootdev --active` vs `--next-boot` and the other slot's version; `/proc/cmdline`; the real boot ROM limit (the test bed uses 3).
-- The Updates switch with update-engine masked on real systemd (expected: off, and switching on fails).
-- An AAAA (IPv6) lookup of a blocked name. systemd-resolved can't run in the test bed, so name lookups there went to `/etc/hosts` directly.
+- The Updates switch with update-engine masked on the real tablet. In the emulator (real systemd 255): it reads off; switching it on logs `Error when enabling update engine! "org.freedesktop.systemd1.UnitMasked"` and the unit stays masked and inactive, but the switch then shows on (and "Check for updates" spins, reaching nothing) until xochitl restarts; after a reboot it reads off again. `test/e2e` checks this.
+- An AAAA (IPv6) lookup of a blocked name in the test bed (systemd-resolved can't run there). In the emulator it returns no address (see above).
 - Tailscale login, reachability, battery cost.
 - The developer mode flow itself and onboarding without Wi-Fi.
 - Scenario 9 with the real `xovi.so` and real xochitl (the test bed has a stand-in), and `PP_SLOW=1` (scenario 8) on this pass's files.
