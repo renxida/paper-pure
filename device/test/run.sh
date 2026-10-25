@@ -70,6 +70,20 @@ dev() { # ssh to the test bed; under qemu load sshd can miss the banner timeout,
     done
 }
 inst() { "$REPO/device/install.sh" -p "$PORT" -i "$WORK/id" --key "$WORK/id.pub" "$@" root@127.0.0.1; }
+ota_state() { # the stock OTA stack's view: lpgpr's update flag, swupdate's server, its journal
+    dev "n=${1:-25}; "'echo "swu_status=$(cat /sys/devices/platform/lpgpr/swu_status 2>&1) at $(date -u +%T)"
+        sed -n "s/^ *url *= */swupdate server: /p" /tmp/swupdate.cfg 2>/dev/null
+        journalctl -b --no-pager -o short-monotonic -u swupdate.service -u update-engine.service -u swupdate-progress.service 2>/dev/null |
+            grep -viE "token" | tail -n "$n"' 2>&1 | sed 's/^/   ota| /' || true
+}
+install_diag() { # LOG: why an install failed: its own verdict, then the test bed's side
+    echo "  -- $(basename "$1"): FAIL/ERROR/WARN lines, then its last lines"
+    grep -E '^(FAIL|ERROR|WARN)' "$1" | head -n 15 | sed 's/^/   log| /' || true
+    tail -n 12 "$1" | sed 's/^/   end| /' || true
+    echo "  -- test bed: OTA state, failed units, journal tail"
+    ota_state 25
+    dev 'systemctl --failed --no-legend --plain 2>&1 | head -n 10; journalctl -b --no-pager -o short-monotonic 2>/dev/null | tail -n 15' 2>&1 | sed 's/^/   tb | /' || true
+}
 
 # ------------------------------------------------------------- container
 cleanup() {
@@ -149,6 +163,9 @@ check "it flags swupdate as not masked" grep -q 'FAIL    masked: swupdate.servic
 check "it flags the hosts block" grep -q "FAIL    /etc/hosts block 'paper-pure freeze'" <<< "$out"
 check "stock memfaultd was started this boot" dev '[ "$(systemctl show -P InactiveExitTimestampMonotonic memfaultd.service)" != 0 ]'
 check "verify changed nothing on the tablet" dev '! test -e /home/root/paper-pure/device/managed.list'
+grep -E 'swu_status|update staged' <<< "$out" | sed 's/^/  stock verify: /' || true
+check "stock test bed: preflight passes (no OS update staged)" grep -q 'PASS    no OS update staged' <<< "$out"
+ota_state 8
 
 t "2. install"
 inst > "$WORK/2-install.log" 2>&1 && rc=0 || rc=$?
@@ -173,10 +190,18 @@ check "device.cloud.remarkable.com resolves to 0.0.0.0 or to no address" dev '
         case $out in *"does not have any RR of the requested type"*) ;; *) exit 1 ;; esac
     done'
 check "stock hosts lines kept" dev 'grep -q "^127.0.0.1.*localhost" /etc/hosts'
+if ! grep -q 'pp-device: all checks passed' "$WORK/2-install.log"; then
+    install_diag "$WORK/2-install.log"
+    # Everything below builds on a frozen test bed.
+    echo; echo "device tests: stopped after the first install ($PASS passed, $FAILN failed; logs in $WORK)"
+    for f in "${FAILED[@]}"; do echo "  FAILED: $f"; done
+    exit 1
+fi
 
 t "3. install again: nothing to change"
 inst > "$WORK/3-install-again.log" 2>&1 && rc=0 || rc=$?
 check "second install exits 0" [ "$rc" = 0 ]
+[ "$rc" = 0 ] || install_diag "$WORK/3-install-again.log"
 check "second install changes nothing" [ "$(grep -c '^CHANGE' "$WORK/3-install-again.log" || true)" = 0 ]
 
 t "4. reboot: the freeze comes from the root fs, not the tmpfs overlay"
@@ -202,7 +227,7 @@ check "verify reports the drift" grep -q 'FAIL    drift: /etc/systemd/system/swu
 dev 'mount -o remount,rw / && mkdir -p /run/x && mount --bind / /run/x && sed "/paper-pure freeze start/,/paper-pure freeze end/d" /run/x/etc/hosts > /run/h && cat /run/h > /run/x/etc/hosts && umount /run/x && mount -o remount,ro /'
 out=$(inst --verify 2>&1) && rc=0 || rc=$?
 check "verify catches a root-fs-only edit of /etc/hosts" grep -q "FAIL    /etc/hosts block 'paper-pure freeze'" <<< "$out"
-inst > "$WORK/5-repair.log" 2>&1
+inst > "$WORK/5-repair.log" 2>&1 || install_diag "$WORK/5-repair.log"
 check "install repairs both" logto "$WORK/5-verify-repaired.log" inst --verify
 dev 'touch /data/internal/rm_enable_ssh_wifi_marker 2>/dev/null || { mkdir -p /data/internal; touch /data/internal/rm_enable_ssh_wifi_marker; }'
 check "verify catches the SSH-over-Wi-Fi marker" bash -c "! $(printf '%q ' "$REPO/device/install.sh" -p "$PORT" -i "$WORK/id" --verify root@127.0.0.1) > /dev/null 2>&1"
@@ -266,6 +291,7 @@ check "memfaultd is crash-looping before the reinstall" dev '
     echo "  memfaultd restarts: $a, 10 s later $b"; [ "$b" -gt "$a" ]'
 inst > "$WORK/7-reinstall.log" 2>&1 && rc=0 || rc=$?
 check "reinstall over the crash loop exits 0" [ "$rc" = 0 ]
+[ "$rc" = 0 ] || install_diag "$WORK/7-reinstall.log"
 check "the test bed stayed up (PID 1 survived the mask and reload)" alive
 check "memfaultd was stopped before it was masked (inactive, not failed)" dev '
     s=$(systemctl is-active memfaultd.service); e=$(systemctl is-enabled memfaultd.service); echo "  memfaultd: $s, $e"
