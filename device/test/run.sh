@@ -32,14 +32,17 @@ C=${PP_NAME:-pp-device-it}
 PORT=${PP_PORT:-3094}
 WORK=${PP_WORK:-$(mktemp -d)}
 mkdir -p "$WORK"
-PASS=0 FAILN=0
+PASS=0 FAILN=0 FAILED=()
 
 ok()   { PASS=$((PASS + 1)); echo "  ok   $*"; }
-bad()  { FAILN=$((FAILN + 1)); echo "  FAIL $*"; }
+bad()  { FAILN=$((FAILN + 1)); FAILED+=("$*"); echo "  FAIL $*"; }
 check() { local what=$1; shift; if "$@"; then ok "$what"; else bad "$what"; fi; }
 t() { printf '\n== %s\n' "$*"; }
 # shellcheck disable=SC2317  # called through check()
-logto() { local f=$1; shift; "$@" > "$f" 2>&1; }   # check "..." logto FILE CMD: CMD's output to FILE, the verdict on screen
+logto() { # check "..." logto FILE CMD: CMD's output to FILE, the verdict on screen (and FILE's FAIL lines if it failed)
+    local f=$1; shift; "$@" > "$f" 2>&1 && return 0
+    grep '^FAIL' "$f" | head -n 10 | sed 's/^/       | /'; return 1
+}
 
 # ------------------------------------------------------------- images
 if ! docker image inspect "pp-device-rootfs:$TAG" > /dev/null 2>&1; then
@@ -186,7 +189,7 @@ dev 'mount -o remount,rw / && mkdir -p /run/x && mount --bind / /run/x && sed "/
 out=$(inst --verify 2>&1) && rc=0 || rc=$?
 check "verify catches a root-fs-only edit of /etc/hosts" grep -q "FAIL    /etc/hosts block 'paper-pure freeze'" <<< "$out"
 inst > "$WORK/5-repair.log" 2>&1
-check "install repairs both" inst --verify > /dev/null 2>&1
+check "install repairs both" logto "$WORK/5-verify-repaired.log" inst --verify
 dev 'touch /data/internal/rm_enable_ssh_wifi_marker 2>/dev/null || { mkdir -p /data/internal; touch /data/internal/rm_enable_ssh_wifi_marker; }'
 check "verify catches the SSH-over-Wi-Fi marker" bash -c "! $(printf '%q ' "$REPO/device/install.sh" -p "$PORT" -i "$WORK/id" --verify root@127.0.0.1) > /dev/null 2>&1"
 inst > "$WORK/5-repair-marker.log" 2>&1
@@ -237,7 +240,7 @@ check "stock /etc/hosts lines still there" dev 'grep -q "^127.0.0.1.*localhost" 
 check "pp-agent-boot no longer enabled" dev '! test -e /etc/systemd/system/multi-user.target.wants/pp-agent-boot.service'
 check "pp-agent-tripletap no longer enabled" dev '! test -e /etc/systemd/system/multi-user.target.wants/pp-agent-tripletap.service'
 inst > "$WORK/7-reinstall.log" 2>&1
-check "and install brings it all back" inst --verify > /dev/null 2>&1
+check "and install brings it all back" logto "$WORK/7-verify-reinstalled.log" inst --verify
 
 t "9. kill switch and crash loops: real pp-agent, real mods hooks, systemd 255"
 # Test releases: mods/release/hooks/*.sh as shipped, upstream's xovi/start and
@@ -473,11 +476,12 @@ if [ "${PP_SLOW:-0}" = 1 ]; then
     state 'sed -n "/phase-early/,\$p" /s/boots.log' > "$WORK/8-boots.log"
     state 'rm -f /s/crash-mod; echo 0 > /s/lpgpr/roota_errcnt'
     boot
-    check "after the loops, verify still passes" inst --verify > /dev/null 2>&1
+    check "after the loops, verify still passes" logto "$WORK/8-verify.log" inst --verify
 fi
 
 echo
 echo "device tests: $PASS passed, $FAILN failed (logs in $WORK)"
+for f in "${FAILED[@]}"; do echo "  FAILED: $f"; done
 [ "$FAILN" = 0 ]
 exit
 }

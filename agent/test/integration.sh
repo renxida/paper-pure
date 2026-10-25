@@ -40,8 +40,8 @@ die()  { echo "  FAIL: $*" >&2; echo "  workdir kept: $W" >&2; exit 1; }
 cleanup() {
     local me; me="$(id -u):$(id -g)"
     if [ -n "$(find "$W" ! -user "$(id -u)" -print -quit 2>/dev/null)" ]; then
-        docker exec "$NAME" chown -R "$me" /home/root /fake /feed >/dev/null 2>&1 ||
-            docker run --rm --platform linux/arm64 -v "$W:/w" "$IMAGE" chown -R "$me" /w >/dev/null 2>&1 || true
+        docker exec "$NAME" chown -hR "$me" /home/root /fake /feed >/dev/null 2>&1 ||
+            docker run --rm --platform linux/arm64 -v "$W:/w" "$IMAGE" chown -hR "$me" /w >/dev/null 2>&1 || true
     fi
     docker rm -f "$NAME" >/dev/null 2>&1 || true
 }

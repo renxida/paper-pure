@@ -26,9 +26,21 @@ make rung2      # the emulator; E2E_ARGS="--skip-build --keep" passes through
 make loop       # rung1, then proofs, then rung2; stops at the first failure
 ```
 
-Each step logs to `out/logs/<target>/<step>.log` and prints one PASS or FAIL line. A FAIL also prints the log's last 40 lines. `out/` ignores itself.
+Each step logs to `out/logs/<target>/<step>.log`. On screen it prints a start line, a `....` line every minute with the log's last line, then one PASS or FAIL line. A FAIL also prints the log's first 20 lines with `FAIL` in them, then its last 80 lines. `out/` ignores itself.
+
+Every step has a time limit (`timeout`, then KILL 30 s later), so a hang fails that step with `TIMEOUT` instead of eating the job. The default is 20 min. Proofs and rung2 run arm64 code, so their limits are set for native arm64 and multiplied by 4 elsewhere (qemu). The job's `timeout-minutes` in `ci.yml` stays above the sum of its steps' limits.
 
 The host needs docker (with arm64 binfmt on x86), go, node 22, python3, shellcheck, ssh, ssh-keygen, curl, openssl, cpio and Qt's `rcc` (apt `qt6-base-dev-tools`). Behind a TLS-intercepting proxy, add `PP_BUILD_CA=/path/to/ca.pem`.
+
+## Root here, `runner` there
+
+The dev container runs everything as root. GitHub's runners run as user `runner` (passwordless sudo, in the `docker` group), on cgroup v2 with AppArmor on. Our test containers run as root, like the tablet. The first GitHub runs hit three things that root never sees:
+
+- **Files a container writes into a bind mount belong to root.** The host user can't delete them (agent integration failed in its cleanup after 61 passed checks), or read them when the directory is 0700 (pp-proxy's `proxy/ca.crt` in the server proof). Read such files with `docker exec`. Before removing a work dir, hand it back with `docker exec ... chown -hR "$(id -u):$(id -g)"`. Cleanup never fails a run that passed.
+- **systemd as PID 1 needs AppArmor off and the host cgroup namespace.** Docker's `docker-default` AppArmor profile denies `mount` even with `SYS_ADMIN`, which most likely killed the device test bed's `boot.sh` at its first mount on GitHub (its log never left the runner; this host has no AppArmor). On cgroup v2, docker's default private cgroup namespace plus the rw `/sys/fs/cgroup` bind shows systemd the host's root cgroup: it moves itself out of the container, and journald fails. The test bed now runs like the emulator does: `--security-opt apparmor=unconfined --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw`.
+- **Unbounded waits hang.** When the test bed died, `run.sh` waited for it forever (57 min, until GitHub cancelled the job). Every wait now has a bound and prints the container's console when it gives up.
+
+To check a change the way CI runs it, use a non-root user in the `docker` group with its own copy of the repo, for example `sudo -u runner -H make -C ~runner/paper-pure proofs`.
 
 ## Firmware
 
@@ -112,7 +124,7 @@ One more honest note: the release job rebuilds from the same commit rather than 
 
 ## Status
 
-Oct 25 2026, x86_64 dev container (no arm64 machine, no GitHub runs yet).
+Oct 25 2026, x86_64 dev container (no arm64 machine). The first GitHub runs passed `rung1` and failed `proofs` on the root vs `runner` issues above; the fixes were re-run locally as a non-root user.
 
 Verified:
 

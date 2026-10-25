@@ -19,7 +19,7 @@ PASS=0
 ok()  { PASS=$((PASS + 1)); echo "  ok: $*"; }
 die() { echo "  FAIL: $*" >&2; exit 1; }
 cleanup() { # hand root's files in the bind mount back to the host user (not root on CI), then go
-    docker exec "$NAME" chown -R "$(id -u):$(id -g)" /home/root >/dev/null 2>&1 || true
+    docker exec "$NAME" chown -hR "$(id -u):$(id -g)" /home/root >/dev/null 2>&1 || true
     docker rm -f "$NAME" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT

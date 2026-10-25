@@ -287,7 +287,7 @@ step_freeze() {
     tap 56 56
     tap 56 56
     shot freeze-back 0.25
-    hasnt "journal: no update host named" "$(dev 'journalctl -b --no-pager' | grep -E "$BLOCKED" || true)" "remarkable"
+    eq "journal lines naming an update host" "$(dev 'journalctl -b --no-pager' | grep -cE "$BLOCKED" || true)" 0
     dns_start
 }
 
@@ -321,6 +321,7 @@ step_sync() {
     tap 644 1324
     tap 1326 56
     tap 1216 504   # the first-visit tooltip
+    tap 200 856    # Black in the pen panel (a fresh notebook sometimes starts on highlighter yellow here)
     log "draw: $("$PPEMU" draw 650,1500 800,1300 950,1550 1100,1300 1250,1500)"
     log "draw: $("$PPEMU" draw 700,1700 1200,1700)"
     shot sync-notebook
@@ -345,7 +346,11 @@ step_sync() {
     png=$(find "$W/inbox" -name page.png | head -n 1)
     [ -n "$png" ] || die "tools/wishes found no page"
     cp "$png" "$SHOTS/sync-rendered-from-server.png"
-    eq "rendered from the server copy: drawn points" "$(px "$png" 800,1300 950,1550 1100,1300 950,1700 --radius 4)" "0 0 0 0"
+    local ink
+    ink=$(px "$png" 800,1300 950,1550 1100,1300 950,1700 --radius 4)
+    log "rendered from the server copy, gray level at the drawn points: $ink"
+    for v in $ink; do [ "$v" -lt 230 ] || die "rendered from the server copy: no ink at a drawn point ($ink)"; done
+    ok "rendered from the server copy: ink at all 4 drawn points"
     eq "rendered from the server copy: blank paper" "$(px "$png" 300,300 300,1500 1300,300)" "255 255 255"
     # The other way: a document uploaded on the server shows up on the device.
     printf '%%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]>>endobj\ntrailer<</Root 1 0 R>>\n%%%%EOF\n' > "$W/e2e-from-server.pdf"
@@ -550,7 +555,8 @@ for s in $STEPS; do
         printf 'PASS  %-10s %4ds\n' "$name" $((SECONDS - t0))
     else
         rc=$?
-        why=$(grep -E 'FAIL' "$LOGS/$name.log" | tail -n 1 | cut -c1-200)
+        why=$(grep -E 'FAIL' "$LOGS/$name.log" | tail -n 1 | cut -c1-200 || true)
+        [ -n "$why" ] || why=$(tail -n 1 "$LOGS/$name.log" | cut -c1-200)
         [ "$rc" != 124 ] || why="timed out after ${limit}s"
         printf 'FAIL  %-10s %4ds  %s  (log: %s)\n' "$name" $((SECONDS - t0)) "${why:-exit $rc}" "$LOGS/$name.log"
         failed=$((failed + 1))

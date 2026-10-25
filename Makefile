@@ -41,20 +41,23 @@ STEP_LIMIT := 1200
 #   started get TERM (KILL 30 s later), exit 124/137. Ctrl-C still reaches it.
 # step [-t SECS] NAME CMD...: CMD's output goes to $L/NAME.log, a "...." line
 #   every minute while it runs (with the log's last line), then one PASS/FAIL
-#   line, plus the log's tail on failure; returns CMD's status. Default limit
-#   STEP_LIMIT. summary: all the lines again, then exit 1 if any failed.
+#   line, plus on failure the log's first FAIL lines (!) and its tail (|);
+#   returns CMD's status. Default limit STEP_LIMIT. summary: all the lines
+#   again, then exit 1 if any failed.
 LIMIT = limit() { local s=$$1 p rc=0; shift; timeout -k 30 "$$s" "$$@" & p=$$!; \
     trap "kill -INT -- -$$p 2> /dev/null; wait $$p; exit 130" INT TERM; \
     wait "$$p" || rc=$$?; trap - INT TERM; return "$$rc"; }
 STEP = L=$(LOGS)/$@; rm -rf "$$L"; mkdir -p "$$L"; : > "$$L/summary"; $(LIMIT); \
   step() { local s=$(STEP_LIMIT) n t=$$SECONDS r=PASS rc=0 hb why=; [ "$$1" != -t ] || { s=$$2; shift 2; }; \
     n=$$1; shift; printf '....  %-18s start (limit %ss)\n' "$$n" "$$s"; \
-    { while sleep 60 > /dev/null 2>&1 && kill -0 $$$$ 2> /dev/null; do printf '....  %-18s %5ss  %s\n' "$$n" "$$((SECONDS - t))" \
-        "$$(tail -n 1 "$$L/$$n.log" 2> /dev/null | tr -d '\r' | cut -c1-110)"; done; } & hb=$$!; \
+    { trap 'kill $$z 2> /dev/null; exit 0' TERM; while sleep 60 > /dev/null 2>&1 & z=$$!; wait $$z && kill -0 $$$$ 2> /dev/null; do \
+        printf '....  %-18s %5ss  %s\n' "$$n" "$$((SECONDS - t))" "$$(tail -n 1 "$$L/$$n.log" 2> /dev/null | tr -d '\r' | cut -c1-110)"; \
+      done; } & hb=$$!; \
     limit "$$s" "$$@" > "$$L/$$n.log" 2>&1 || rc=$$?; kill "$$hb" 2> /dev/null; \
     case $$rc in 0) ;; 124|137) r=FAIL why=" TIMEOUT after $${s}s" ;; *) r=FAIL ;; esac; \
     printf '%s  %-18s %5ss  %s%s\n' "$$r" "$$n" "$$((SECONDS - t))" "$$L/$$n.log" "$$why" | tee -a "$$L/summary"; \
-    [ $$r = PASS ] || { tail -n 80 "$$L/$$n.log" | sed 's/^/      | /'; return 1; }; }; \
+    [ $$r = PASS ] || { grep -m 20 -E '\bFAIL\b' "$$L/$$n.log" | sed 's/^/      ! /'; \
+      tail -n 80 "$$L/$$n.log" | sed 's/^/      | /'; return 1; }; }; \
   summary() { local f; f=$$(grep -c '^FAIL' "$$L/summary" || true); echo; cat "$$L/summary"; \
     echo "== $@: $$(grep -c '^PASS' "$$L/summary" || true) passed, $$f failed (logs in $$L)"; [ "$$f" = 0 ]; }; \
   need() { local t m=; for t; do command -v "$$t" > /dev/null || m="$$m $$t"; done; \
@@ -71,7 +74,7 @@ $(OUT)/.gitignore:
 
 # ---------------------------------------------------------------- rung 1
 rung1: | $(OUT)/.gitignore
-	@$(STEP); need go python3 shellcheck docker node git; \
+	@$(STEP); need go python3 shellcheck docker node git timeout; \
 	step agent        $(MAKE) -C agent test; \
 	step server       $(MAKE) -C server test; \
 	step wishes       $(MAKE) -C tools/wishes test; \
@@ -154,7 +157,7 @@ loop:
 # release is built and packed with a throwaway key as a check, and nothing
 # lands in out/feed/.
 release: | $(OUT)/.gitignore
-	@$(STEP); need docker go git openssl curl readelf; rm -rf $(OUT)/feed; \
+	@$(STEP); need docker go git openssl curl readelf timeout; rm -rf $(OUT)/feed; \
 	echo "release $(RELEASE_ID) for OS $(PP_OS)"; \
 	{ step rootfs     $(MAKE) rootfs && \
 	  step -t $$((30 * 60 * $(QEMU))) mods-build env RELEASE_ID=$(RELEASE_ID) mods/build.sh && \
