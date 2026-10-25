@@ -132,6 +132,7 @@ Review fixes, checked here (x86_64 dev container):
 
 - `make publish` against the real ppd behind the fake Access gate: a first release publishes; the same one again, and one packed with an older `created`, give `SKIP ... is as new or newer`; a newer one built from the same inputs gives `SKIP ... same inputs`; one with other inputs publishes; a gate that refuses the token (403) fails the target. `publish-check.py` exits 1 on an HTML page.
 - `actionlint` is clean with the main-tip check in the release job. The check itself (`git ls-remote`) has not run on GitHub.
+- On the final tree, as root here: `make rung1` 8 of 8 (hello now also taps Close; that test passes as user `runner` too); `make proofs` 5 of 5 in 46 min (agent integration 61 checks, server proof PASS 95, wishes, device test bed 98 passed); `make rung2` all 11 steps in 26.6 min from `ppemu reset`.
 
 Earlier, in the x86_64 dev container (no arm64 machine):
 

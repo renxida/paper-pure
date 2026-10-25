@@ -89,7 +89,7 @@ Nothing here touches xochitl, its unit, the pen or display stack. We stop update
 - **7. Reinstall over a crash-looping memfaultd.** `boot.sh` makes memfaultd restart every second with no start limit (`$STATE/memfaultd-loop`). It restarted 66 times, then 69 ten seconds later; `install` exited 0, the test bed stayed up, and memfaultd ended `inactive, masked` (stopped before masking). The old order (mask, reload, then stop; `git show 1f13ecc^`) leaves it `failed, masked` in 2 of 2 tries by hand; PID 1 survived those too, so the abort the CI lane saw is a race this does not force.
 - `pp-agent.service` (an install) now waits for rm-sanity too: its drop-in is persisted and checked by `verify` (scenario 6).
 - The four extra blocked names resolve to nowhere (`verify` in rung 2: `resolves to no address (systemd-resolved, A and AAAA): auth.remarkable.com`, and the other three).
-- `restore` refuses a path it never persisted. In a plain container: `pp-device.sh restore /etc/issue` gives `ERROR /etc/issue: not managed by pp-device`, exit 1, and the file is untouched (before: deleted, `CHANGE /etc/issue (stock)`). The test bed check for it was added after this run; `make proofs` runs it.
+- `restore` refuses a path it never persisted. In a plain container: `pp-device.sh restore /etc/issue` gives `ERROR /etc/issue: not managed by pp-device`, exit 1, and the file is untouched (before: deleted, `CHANGE /etc/issue (stock)`). The test bed checks it too (scenario 5): `make proofs` afterwards gave **98 passed, 0 failed** in 43 min under qemu, alone.
 
 ### Fixed by the e2e lane (Oct 25, 2026)
 
