@@ -70,9 +70,11 @@ RUN RELEASE_ID=${RELEASE_ID} RCC=/usr/lib/qt6/libexec/rcc /apps/hello/build.sh /
 COPY device/ /src/device/
 COPY BUILDINFO /src/BUILDINFO
 
-# Assemble /home/root/xovi exactly like upstream's release workflow
+# Assemble /home/root/xovi like upstream's release workflow
 # (rm-xovi-extensions .github/workflows/build-release.yml), plus AppLoad and
-# our apps.
+# our apps. One change: the two links in services/xochitl.service are
+# relative (upstream: absolute /home/root/xovi/...). Same target, and
+# ppsign/pp-agent only accept links that stay inside the release tree.
 RUN set -e; x=/out/tree/xovi; \
     mkdir -p $x/extensions.d $x/inactive-extensions $x/exthome/qt-resource-rebuilder $x/exthome/appload \
              $x/scripts/debug $x/scripts/pre-start $x/scripts/post-start $x/scripts/pre-stock $x/scripts/post-stock \
@@ -84,8 +86,8 @@ RUN set -e; x=/out/tree/xovi; \
     cp -r /build/apps/paper-pure-hello $x/exthome/appload/; \
     cp -r /src/device $x/paper-pure; \
     chmod a+x $x/start $x/stock $x/debug $x/rebuild_hashtable; \
-    ln -s /home/root/xovi/extensions.d $x/services/xochitl.service/extensions.d; \
-    ln -s /home/root/xovi/exthome $x/services/xochitl.service/exthome; \
+    ln -s ../../extensions.d $x/services/xochitl.service/extensions.d; \
+    ln -s ../../exthome $x/services/xochitl.service/exthome; \
     cp /src/BUILDINFO $x/BUILDINFO; \
     (cd $x && find . -type f -name '*.so' | sort | xargs sha256sum) >> $x/BUILDINFO; \
     tar --sort=name --owner=0 --group=0 --numeric-owner --mtime=@0 -C /out/tree -czf /out/xovi-tatsu.tar.gz xovi; \

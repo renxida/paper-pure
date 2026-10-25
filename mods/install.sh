@@ -70,4 +70,8 @@ if [ "$START" = 1 ]; then
     grep -q "xovi ON" < <(xovi/paper-pure/status) || { echo "device: xovi did not come up" >&2; exit 1; }
 fi
 DEVICE
-echo "install.sh: done. Stock again: reboot, or ssh $target /home/root/xovi/stock"
+if [ "$target" = emu ]; then
+    echo "install.sh: done. Stock again: emu/bin/ppemu restart, or emu/bin/ppemu ssh /home/root/xovi/stock"
+else
+    echo "install.sh: done. Stock again: reboot, or ssh $target /home/root/xovi/stock"
+fi
