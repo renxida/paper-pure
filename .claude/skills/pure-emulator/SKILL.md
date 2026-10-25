@@ -5,7 +5,7 @@ description: Drive the reMarkable Paper Pure emulator in emu/ (stock tatsu OS 3.
 
 # Paper Pure emulator
 
-`emu/bin/ppemu` drives a container (`pp-emu-tablet`) running the real Paper Pure root filesystem with a hardware shim. It is rung 2 of the dev loop: nothing goes to Cedar's tablet that hasn't worked here. Read `emu/README.md` for what it can't tell you (e-ink timing, pen feel, battery, sleep).
+`emu/bin/ppemu` drives a container (`pp-emu-tablet`) running the real Paper Pure root filesystem, booted by its own systemd and laid out like the tablet, with a hardware shim. It is rung 2 of the dev loop: nothing goes to Cedar's tablet that hasn't worked here. Read `emu/README.md` for what it can't tell you (e-ink timing, pen feel, battery, sleep).
 
 Run commands from the repo root. Cedar may be watching the same device at http://127.0.0.1:7777, so act deliberately.
 
@@ -15,6 +15,7 @@ Run commands from the repo root. Cedar may be watching the same device at http:/
 emu/bin/ppemu status        # container, UI server, images, host speed
 emu/bin/ppemu start         # boot (first run fetches + verifies firmware and builds the image)
 emu/bin/ppemu skip-setup    # fresh device: skip onboarding, land on My files
+emu/bin/ppemu reboot        # reboot the device (runtime drop-ins, /etc edits, /run, /tmp gone), wait for the UI
 emu/bin/ppemu reset         # factory reset: wipes pp-emu-home/pp-emu-data (all notebooks), leaves it stopped; `start` then boots onboarding. Ask first if someone else uses it
 ```
 
@@ -53,29 +54,33 @@ emu/bin/ppemu usb connect|disconnect # charger (status bar shows the bolt)
 emu/bin/ppemu battery 15             # battery percent
 emu/bin/ppemu marker dock|undock     # Marker attach (marker-manager reacts; no NFC)
 emu/bin/ppemu folio close|open       # hall sensor
+emu/bin/ppemu wifi off|on            # flight mode: wlan0 gone (cuts SSH and the screen too; use docker exec meanwhile)
 ```
 
 Don't use the in-OS Settings → Restart / Turn off; use `ppemu restart`.
 
 ## 4. Develop and deploy
 
-The emulator behaves like a tablet in developer mode:
+The emulator behaves like a tablet in developer mode, systemd included:
 
 ```bash
 emu/bin/ppemu ssh 'cmd'                  # like ssh root@10.11.99.1; interactive with no cmd
-emu/bin/ppemu push ./thing /home/root/thing
+emu/bin/ppemu push ./thing /home/root/thing   # file or directory, any path (/tmp too)
 emu/bin/ppemu pull /home/root/.local/share/remarkable/xochitl ./out
-emu/bin/ppemu restart                    # restart xochitl and wait for its UI (~60 s under qemu); `systemctl restart xochitl` over ssh doesn't wait
-emu/bin/ppemu logs [-f]                  # xochitl + shim + rmemud
+emu/bin/ppemu restart                    # reset-failed + restart xochitl, wait for its UI (~60 s under qemu); plain `systemctl restart xochitl` over ssh doesn't wait
+emu/bin/ppemu logs [-f]                  # console: the journal (xochitl, shim, rmemud, every unit). Full: ppemu ssh journalctl -b [-u UNIT]
 ```
 
 - Identity, as on the tablet: `cat /etc/version` → `20260520084102`; `/sys/devices/soc0/machine` and `/proc/device-tree/model` → `reMarkable Tatsu`; `IMG_VERSION="3.27.2.2"` in `/etc/os-release`.
-- Scripts written for the real tablet: `ssh -i emu/.ppemu/id_ed25519 -p 2222 root@127.0.0.1` (swap for `root@10.11.99.1` on hardware).
-- Only `/home` and `/data` persist (Docker volumes). Everything else is the read-only-in-spirit rootfs and resets when the container is recreated, like an OTA on the device.
+- Scripts written for the real tablet run unmodified: `ssh -i emu/.ppemu/id_ed25519 -p 2222 root@127.0.0.1` (swap for `root@10.11.99.1` on hardware). `mods/install.sh emu`, `device/install.sh -p 2222 -i emu/.ppemu/id_ed25519 root@127.0.0.1` and pp-agent with default config all work here.
+- **systemd is real** (the image's own, PID 1): units, drop-ins, `systemctl show`, timers, enable/mask, `OnFailure=`. xochitl's stock start limit applies: 4 starts in 10 min, then `emergency.target` reboots, which stops the container (`ppemu start` boots it again). `ppemu restart` and `skip-setup` reset the counter; your own scripts should `systemctl reset-failed xochitl` too, as on the tablet.
+- **Persistence, as on the tablet:** `/` is read-only (`mount -o remount,rw /` works); `/etc` is an overlay with a tmpfs upper, so a plain write there is gone at `ppemu reboot`. Write through `mount --bind / X` (or `device/tablet/pp-device.sh persist`) to keep it. `/home` and `/data` are volumes. `ppemu rebuild` and `reset` give a fresh root fs (like reflashing).
+- **Network:** the device's `wlan0` is up with the default route (pp-agent's Wi-Fi gate passes with default config). The host is the bridge gateway, usually `172.17.0.1` (`ppemu status` prints it); serve test servers there or on `0.0.0.0`. No `host.docker.internal` inside. `/etc/hosts` edits work at once (systemd-resolved reads it; it answers `0.0.0.0` lines with "no address").
+- **Fake hardware at the real paths:** battery and charger (`/sys/class/power_supply/max77818_battery`, `max77818-charger`), `/sys/class/net/wlan0`, input names in `/sys/class/input`, `lpgpr`, `soc0`. Static binaries see them too. `/dev/input/event0..3` are FIFOs for programs without the shim; event0 is the power key (`44440000.bbnsm:pwrkey`).
 - Notebooks: `/home/root/.local/share/remarkable/xochitl/`. Settings: `/home/root/.config/remarkable/xochitl.conf`, `/data/xochitl.conf`.
-- `systemctl` only knows `xochitl`, `marker-manager`, `rmemud`. There is no systemd, no network, no cloud.
-- The device shell is bash plus busybox: `head -n 3` (not `head -3`), no `od -A`, no python, no curl. Pull files out and inspect them on the host.
-- Input devices for apps reading evdev directly: event0 power key, event1 pen (ABS_X 0..14040, ABS_Y 0..18720, pressure 0..4095), event2 touch (MT, 0..1403 x 0..1871), event3 hall sensor. These names and ranges are emulator guesses, not read off a Pure.
+- Masked here (no hardware, or phone-home): udev, tee-supplicant, Wi-Fi/Bluetooth daemons, networkd, chronyd, memfaultd, crashuploader, mdm-agent. swupdate fails at start. `ppemu ssh systemctl --failed` shows only swupdate on a fresh device.
+- The device shell is bash plus busybox: `head -n 3` (not `head -3`), no `od -A`, no python, no curl, no findmnt. Pull files out and inspect them on the host.
+- Input devices for apps reading evdev directly: event0 power key, event1 pen (ABS_X 0..14040, ABS_Y 0..18720, pressure 0..4095), event2 touch (MT, 0..1403 x 0..1871), event3 hall sensor. Pen/touch names and ranges are emulator guesses, not read off a Pure.
 
 ## 5. UI map (3.27.2.2; verify with a screenshot)
 
@@ -95,11 +100,11 @@ Keep strokes at x > 600 while the pen panel is open, x > 150 otherwise. First vi
 
 ## 6. When something's off
 
-- `ppemu status` says not connected: `ppemu logs | tail -50`. A crashed xochitl restarts on its own in about a second (then reloads for ~60 s under qemu).
+- `ppemu status` says not connected: `ppemu logs | tail -50`. A crashed xochitl restarts on its own (systemd, `Restart=on-failure`), then reloads for ~60 s under qemu. Container stopped by itself? It rebooted (`systemctl reboot`, or `rm-emergency` after xochitl failures): `ppemu start`.
 - UI server down but the container runs: `ppemu start` restarts only the server.
 - Missing hardware or a new crash: `ppemu restart --debug`, then `ppemu logs` shows every hardware path and ioctl; `FAIL` lines are what's missing. Read `emu/README.md` and `emu/CLAUDE.md` before changing `emu/shim/`, `emu/daemon/` or `emu/docker/`, then `ppemu rebuild` (keeps device data).
 - Never copy files out of the firmware or the container into the repo. Firmware lives in `emu/firmware/` (gitignored) and nowhere else.
 
 ## Not emulated
 
-E-ink refresh (no flash, no ghosting, instant final image), real pen latency, battery behaviour, real suspend, Wi-Fi, Bluetooth, cloud sync, OTA, NFC. Screenshots are xochitl's RGB render; the real panel is grayscale. Don't report UI behaviour in those areas as real-device behaviour.
+E-ink refresh (no flash, no ghosting, instant final image), real pen latency, battery behaviour, real suspend, the Wi-Fi radio, Bluetooth, OTA, NFC, A/B slot switching. Sync runs (rm-sync) but needs a server you point it at. Screenshots are xochitl's RGB render; the real panel is grayscale. Don't report UI behaviour in those areas as real-device behaviour.

@@ -50,8 +50,8 @@ Stock tatsu xochitl (`xochitl.service` plus `/usr/lib/systemd/system/xochitl.ser
 What keeps that safe:
 
 - **Our restarts don't count.** The agent runs `systemctl reset-failed xochitl.service` before every hook, and the mods hooks do it again right before their own restart. The 4 starts are left for real crashes.
-- **Crash loops slower than about a second each** (a broken hook that dies a few seconds in): the health check sees the first new PID and rolls back before the 4th crash. Shown in the test bed: no reboot, `rm-emergency` never ran.
-- **Faster ones** (a library that won't load, dead at once): the OS reboots mid-check. The agent gets SIGTERM, leaves `pending` set and runs no hooks. The reboot drops xovi's tmpfs drop-in, so xochitl comes up stock, and `pp-agent boot` rolls `pending` back. The release is marked failed.
+- **Slow crash loops** (a hook that dies a few seconds in): the health check polls once a second and rolls back at the first new PID, which leaves 3 more crashes before the limit. Test bed, a crash every 5 s: rolled back after 2 crashes, no reboot, `rm-emergency` never ran.
+- **Instant ones** (a library that won't load): the OS reboots mid-check. The agent gets SIGTERM, leaves `pending` set and runs no hooks. The reboot drops xovi's tmpfs drop-in, so xochitl comes up stock, and `pp-agent boot` rolls `pending` back and marks the release failed. Test bed: rebooted 5 s into the check, rolled back at the next boot, boot counter 1.
 - **Never an A/B swap.** OS updates never run here (device lane), and `rm-sanity` writes `swu_applied=0` 60 s after every boot.
 - **Never the bootloader's error count.** The SPL counts boots per slot and falls back to the other slot (an unfrozen OS) past a limit; `rm-sanity` clears the count 60 s after boot. Nothing of ours turns mods on before that: `pp-agent-boot` and `pp-agent-tripletap` wait for rm-sanity (device lane drop-in), the update timer starts at 3 minutes. So every crash reboot happens with the count at 0, and the next boot counts 1.
 - **A hang, not a crash:** the watchdog kills xochitl at 60 s, and the 70 s stability window sees it.

@@ -2,7 +2,7 @@
 
 Rung 2 of the dev loop. Boots the **stock Paper Pure OS (tatsu, 3.27.2.2, the version on Cedar's tablet)** in a Docker container and lets Claude drive it from a CLI: look, tap, write, SSH in, deploy, restart.
 
-The device's own root filesystem runs unmodified in an arm64 container. A preload shim fakes the hardware xochitl talks to: the e-ink controller (SWTCON over a fake DRM device), pen, touch, buttons, battery, charger, temperature, secure key store. Native on arm64 (Apple Silicon, arm64 Linux); under qemu-user on x86_64, which works but is slow.
+The device's own root filesystem runs unmodified in an arm64 container, booted by its own systemd, laid out like the tablet (read-only `/`, `/etc` overlay with a tmpfs upper, `wlan0` up). A preload shim fakes the hardware xochitl talks to: the e-ink controller (SWTCON over a fake DRM device), pen, touch, buttons, battery, charger, temperature, secure key store. Native on arm64 (Apple Silicon, arm64 Linux); under qemu-user on x86_64, which works but is slow.
 
 Forked from [rmemu](https://github.com/aetherino/rmemu) (Paper Pro emulator, MIT, upstream commit `3483a43`, license kept in [LICENSE.rmemu](LICENSE.rmemu)). We adapt it, we don't rewrite it.
 
@@ -19,7 +19,9 @@ emu/bin/ppemu screenshot /tmp/s.png --scale 0.5
 emu/bin/ppemu tap 700 1716   # device pixels, portrait 1404x1872 (this is "+": then Notebook 644,1324, Create 1326,56)
 emu/bin/ppemu draw 700,900 1250,900
 emu/bin/ppemu ssh 'cat /etc/version /sys/devices/soc0/machine'   # 20260520084102, reMarkable Tatsu
-emu/bin/ppemu logs | tail
+emu/bin/ppemu logs | tail    # the device's journal, as its console prints it
+emu/bin/ppemu reboot         # like rebooting the tablet: runtime drop-ins and /etc edits are gone
+emu/bin/ppemu wifi off       # flight mode (wlan0 gone); `wifi on` brings it back
 emu/bin/ppemu reset          # factory reset: removes the container and the pp-emu-home / pp-emu-data volumes; then `start`
 emu/bin/ppemu help           # everything else
 ```
@@ -28,7 +30,7 @@ Every command returns once the screen has settled: `start`, `skip-setup` and `re
 
 Simulator UI for humans: http://127.0.0.1:7777 (pen, eraser, finger, power key, Marker). Agents: [the `pure-emulator` skill](../.claude/skills/pure-emulator/SKILL.md).
 
-Names: container `pp-emu-tablet`, images `pp-emu-tatsu:<version>` (emulator) and `pp-emu-rootfs:<version>` (plain rootfs), volumes `pp-emu-home` and `pp-emu-data`. Ports on 127.0.0.1: 7777 UI + HTTP API, 8888 device hub, 2222 SSH.
+Names: container `pp-emu-tablet`, images `pp-emu-tatsu:<version>` (emulator) and `pp-emu-rootfs:<version>` (plain rootfs), volumes `pp-emu-home` and `pp-emu-data`. Ports on 127.0.0.1: 7777 UI + HTTP API, 8888 device hub, 2222 SSH. The device itself is on docker's default bridge as `wlan0`; it reaches this host at the bridge gateway (`ppemu status` prints both, usually 172.17.0.1).
 
 On an arm64 host nothing changes: same commands, no qemu, and the CLI drops its long waits on its own (it checks `process.arch`).
 
@@ -39,15 +41,47 @@ How slow is x86_64? Measured here (4 vCPU, qemu 8.2): `start` on a factory-fresh
 ```
  host                                 container pp-emu-tablet (stock tatsu rootfs, linux/arm64)
 ┌──────────────────────┐   :8888    ┌───────────────────────────────────────────────┐
-│ host/server.mjs      │◀──────────▶│ rmemud   input hub · display relay · uevents  │
-│  · simulator UI (WS) │            │ xochitl ── rmemu-shim.so (via ld.so.preload)  │
-│  · HTTP API          │   :2222    │   fake DRM for SWTCON · framebuffer capture   │
-│ bin/ppemu (CLI)      │◀── ssh ───▶│   evdev · udev · sd_device · libiio · sysfs   │
-└──────────────────────┘            │   PKCS#11 soft token · marker-manager · dbus  │
+│ host/server.mjs      │◀──────────▶│ systemd (the image's own, PID 1)              │
+│  · simulator UI (WS) │            │ ├ rmemud   input hub · display relay · uevents│
+│  · HTTP API          │   :2222    │ ├ xochitl ── rmemu-shim.so (ld.so.preload)    │
+│ bin/ppemu (CLI)      │◀── ssh ───▶│ │  fake DRM for SWTCON · framebuffer capture  │
+└──────────────────────┘            │ │  evdev · udev · sd_device · libiio · sysfs  │
+                                    │ ├ dbus, logind, resolved, marker-manager,     │
+                                    │ │  rm-sync, dropbear, rm-sanity, …  (stock)   │
+                                    │ └ whatever you install (pp-agent, pp-proxy …) │
                                     └───────────────────────────────────────────────┘
 ```
 
 xochitl renders the UI into a 1404x1872 RGB32 image that SWTCON turns into waveform frames for the panel. The shim grabs that image when it is created and streams changed tiles to the host; that is the screenshot. Input goes the other way as fake evdev events. Everything else xochitl asks the hardware for comes from `docker/root/sys/` or a stub in `shim/`.
+
+## Like the tablet: systemd, /etc, reboot
+
+So the rest of the stack runs here unmodified. `docker/boot.sh` lays out the mounts, then hands PID 1 to the image's own systemd 255, which boots the stock units.
+
+- **`/` is read-only.** The container layer under it is the tablet's root partition: `mount -o remount,rw /` works, and what you write there survives `ppemu reboot` / `stop` / `start`. `ppemu rebuild` and `reset` start from a fresh layer, like reflashing.
+- **`/etc` is an overlay with a tmpfs upper**, mounted by the stock `var-volatile-etc.service`. Plain writes (a runtime drop-in, an `/etc/hosts` line, `systemctl enable`) are gone after a reboot. Writing through `mount --bind / X` lands in the real root fs and stays: the device lane's `pp-device.sh persist`, remagic's trick.
+- **`/run` and `/tmp` are tmpfs**, fresh every boot.
+- **systemd is real**: drop-ins, `Environment=`, `systemctl show` (`ActiveState`, `MainPID`, `NRestarts`, timestamps), `stop` of a stopped unit, `reset-failed`, `is-active`, enable/disable/mask, timers (`rm-sanity.timer` at 60 s, `pp-agent.timer`), `OnFailure=`, start limits. `xovi/start`'s tmpfs drop-in reaches xochitl as on the tablet.
+- **xochitl's stock unit and drop-in apply**, including `Restart=on-failure`, the start limit (4 in 10 min) and `OnFailure=emergency.target`, whose `rm-emergency.sh` reboots. Here that reboot stops the container; `ppemu start` boots it again. `ppemu restart` and `skip-setup` call `reset-failed` first, so a dev loop doesn't trip the start limit.
+- **Emulator-only units live in `/run/systemd/system`** (rebuilt each boot, so the root fs and `/etc` stay stock):
+  - `rmemud.service`, the hardware hub; `dropbear.socket`, SSH on the container network through the stock `dropbear@.service` (the tablet listens on `usb0`).
+  - Masks: hardware the container doesn't have (udev, tee-supplicant, keystore and home crypto, zram, Wi-Fi and Bluetooth daemons, networkd, chronyd, getty, USB gadget) and reMarkable's phone-home daemons (`memfaultd`, `memfault-attributes`, `crashuploader`, `mdm-agent`). `swupdate` is left alone; it fails at start here (no memfaultd config).
+  - xochitl's stock drop-in minus `Requires=dev-dri-card0.device` (only udev would announce it).
+  - Unit credentials reset (the container can't mount the credentials fs, and none are passed on the tablet either).
+  - Under qemu-user only: xochitl's `WatchdogSec` 10 min instead of 60 s; its main thread can be busy for over a minute building a page.
+- **Fake hardware at the real paths.** `docker/root/sys` is bind-mounted over `/sys/class/{power_supply,hwmon,input}`, `/sys/devices/{platform/lpgpr,platform/suspend-event,soc0}`, `/sys/firmware/devicetree` and `/sys/power`, so static binaries (pp-agent) see it too. Only `/proc/device-tree` and `/sys/nfc` still need the shim.
+  - `lpgpr`: slot `a`, `roota_errcnt` 1 at boot, which the stock `rm-sanity` zeroes 60 s in (no slot switching). `soc0/serial_number` is the machine-id, random per container.
+  - `/dev/input/event0..3` are FIFOs fed by rmemud, for programs without the shim. The power key is `event0`, named `44440000.bbnsm:pwrkey` as in the image's `/etc/pm/sleep.wakesrc`.
+- **The shim leaves systemd alone**: PID 1, the `systemd-*` daemons and rmemud get no fakes (PID 1 aborted on them, logind crashed on a fake device monitor).
+- **Shutdown and reboot go through systemd.** `ppemu stop` is `systemctl poweroff`, `ppemu reboot` is `systemctl reboot` plus `start`. (docker stop's `SIGRTMIN+3` doesn't reach systemd under qemu-user.)
+- **Container flags this needs**: `--cap-add SYS_ADMIN`, seccomp and AppArmor unconfined, `--cgroupns host -v /sys/fs/cgroup:/sys/fs/cgroup:rw`, `--read-only`, `-t`. No `--privileged`, no `NET_ADMIN`. `bin/ppemu` passes them.
+
+## Network
+
+- **`wlan0`** is the container's only interface, on docker's default bridge, up, with the default route: what pp-agent's Wi-Fi gate wants, with default config. `ppemu wifi off` disconnects it (flight mode: pp-agent says `no wlan0`). While it is off, the host can't reach the device either (no SSH, no screen); use `docker exec pp-emu-tablet ...`.
+- **The host** is the bridge gateway, usually `172.17.0.1` (`ppemu status` says). A server on the host must listen there or on `0.0.0.0`. Example: `ppsign serve -dir FEED -addr 172.17.0.1:3191`, then `"feed_url": "http://172.17.0.1:3191/"` in the device's `agent.json`. `host.docker.internal` does not exist inside (docker's `/etc/hosts` is replaced by the tablet's).
+- **Names** resolve like on the tablet: glibc asks `systemd-resolved` (running), which reads `/etc/hosts`; docker's DNS servers stand in for DHCP's. Edits to `/etc/hosts` work at once and are gone at reboot unless persisted (`pp-device.sh persist /etc/hosts`). Note: resolved answers a `0.0.0.0` line with "no address" (NODATA), not with `0.0.0.0`. Static Go programs read `/etc/hosts` themselves.
+- To route the device's cloud traffic to a test server: point names at it in `/etc/hosts` (pp-proxy's `hosts` block does this for reMarkable's sync names, at `127.0.0.1`), and give pp-proxy/pp-agent the host address.
 
 ## Firmware
 
@@ -72,14 +106,17 @@ Already have the file? `ppemu setup --swu FILE`, drop it in `emu/firmware/`, or 
 | Front light, keyboard light, Folio keyboard | yes | none on the Pure, nothing to fake | `libcsllight.so` absent |
 | x86 hosts | not supported | works under qemu-user, with shim fixes (below) | boots here |
 | Firmware source | codexctl index | pinned table + reMarkable's bucket; codexctl only lists 3.27.1.0 for the Pure | `data/version-ids.json` |
-| Names | `rmemu`, `bin/rmemu` | `pp-emu-*`, `bin/ppemu` (same commands, plus `rebuild`) | |
+| Init | a shell loop runs xochitl; stub `systemctl` | the image's own systemd, tablet mounts (see above) | |
+| Names | `rmemu`, `bin/rmemu` | `pp-emu-*`, `bin/ppemu` (same commands, plus `rebuild`, `reboot`, `wifi`) | |
 
-Four additions in `shim/hooks.c`, the first two for qemu-user:
+Additions in `shim/`, the first two for qemu-user:
 
 - **Alarm clocks.** `clock_gettime(CLOCK_BOOTTIME_ALARM)` fails on hosts without a wake-capable RTC, so sd-event refuses alarm timers and marker-manager aborts (`Failed to add timer: Operation not supported`). The shim falls back to the plain clock, as upstream already did for `timerfd_create`.
 - **Top realtime signals.** qemu-user can't map guest signals 62 to 64 onto host signals, so blocking them silently does nothing and `sd_event_add_signal` returns EBUSY; xochitl aborts (`Failed to add SIGNO_PRE_AUTOSLEEP handler`). The shim listens on a spare signal instead. Those signals come from the suspend-event driver, which doesn't exist here.
 - **Busy main thread counts as activity.** Under qemu xochitl can compute for 10 to 60 s before it draws a new page (boot, Settings). The shim times how long xochitl's main thread has been out of `poll`/`ppoll` and the display scanner reports that as activity, so "wait until the screen settles" doesn't return halfway. Natively this just makes waits a little more honest.
 - **freopen.** busybox `hexdump` opens files with `freopen`, which upstream didn't hook, so `hexdump /proc/device-tree/...` saw nothing. Now the device shell sees the same fake tree as xochitl.
+- **Hands off systemd** (`hooks.c`): no fakes in PID 1, `systemd-*` and rmemud.
+- **Screen capture stops when the screen goes** (`fb.c`): the scanner thread read SWTCON's buffer after xochitl freed it at exit, and xochitl segfaulted on about one stop in three. Upstream has the same race; without systemd nobody saw it. Under systemd each one was a failure and `OnFailure=emergency.target` rebooted.
 
 Internal names (`/opt/rmemu`, `/run/rmemu`, `RMEMU_*`, `rmemud`) stay as upstream so their fixes still apply cleanly.
 
@@ -94,11 +131,13 @@ What the emulator can't tell you. Test these on the tablet.
 - **Colour.** xochitl renders an RGB32 image; the real panel is grayscale. Highlighter/colour ink shows in colour in screenshots. A second 1404x1872 Grayscale8 buffer exists but stays empty here.
 - **Storage.** Settings shows the Docker host's disk (e.g. 228 GB of 252 GB), not a 32 GB tablet.
 - **Kernel.** `uname -r` shows the Docker host's kernel, not the tablet's `6.12.49+git-imx93-tatsu`; no kernel modules or drivers run.
-- **Not running at all:** Wi-Fi, Bluetooth, cloud sync, swupdate/update-engine (OTA), memfaultd, tee-supplicant (a software PKCS#11 token stands in for OP-TEE), real orientation sensor, NFC (marker-manager talks to fake sysfs).
+- **Not running at all:** the Wi-Fi radio (`wlan0` is a docker veth; wpa_supplicant and networkd are masked), Bluetooth, memfaultd, crashuploader, mdm-agent (masked: the emulator doesn't phone home), swupdate (fails at start), tee-supplicant (a software PKCS#11 token stands in for OP-TEE), chronyd, real orientation sensor, NFC (marker-manager talks to fake sysfs). rm-sync runs; it syncs nothing until pointed at a server.
+- **Boot ROM.** No A/B slots: `lpgpr` is fake, the error count is 1 at each boot and rm-sanity clears it, nothing ever switches slot.
 
 ## Change the emulator
 
-- C in `shim/` (preload library, `shim/pkcs11/` soft token) and `daemon/rmemud.c` compiles inside the Docker build (Ubuntu 24.04 arm64; glibc 2.39 matches the rootfs). After editing: `emu/bin/ppemu rebuild` (keeps device data).
+- C in `shim/` (preload library, `shim/pkcs11/` soft token) and `daemon/rmemud.c` compiles inside the Docker build (Ubuntu 24.04 arm64; glibc 2.39 matches the rootfs). After editing: `emu/bin/ppemu rebuild` (keeps `/home` and `/data`; the root fs starts fresh).
+- The boot: `docker/boot.sh` (mounts, masks) and `docker/units/` (emulator-only units). Same `rebuild`.
 - Missing hardware: `ppemu restart --debug`, then `ppemu logs` shows every hardware path and ioctl; `FAIL` lines are what's missing. Fake sysfs goes in `docker/root/sys/...`; `docker/root/proc/device-tree` is a symlink to the fake device tree, as on the device.
 - Host side (`host/`, `bin/ppemu`) is plain Node with no dependencies.
 
