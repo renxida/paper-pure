@@ -1,0 +1,19 @@
+#!/bin/sh
+# Enough systemctl for the usual dev loop (no systemd in the container): the
+# entrypoint supervises xochitl, marker-manager and rmemud.
+cmd=$1; shift
+[ "$cmd" = daemon-reload ] && exit 0
+for unit in "$@"; do
+    name=${unit%.service}
+    case "$name" in
+    xochitl|marker-manager|rmemud)
+        case "$cmd" in
+        stop) touch "/run/rmemu-$name-stopped"; killall "$name" 2>/dev/null ;;
+        start) rm -f "/run/rmemu-$name-stopped" ;;
+        restart) rm -f "/run/rmemu-$name-stopped"; killall "$name" 2>/dev/null ;;
+        status|is-active) if pidof "$name" >/dev/null; then echo active; else echo inactive; exit 3; fi ;;
+        *) echo "rmemu: systemctl $cmd $unit ignored" ;;
+        esac ;;
+    *) echo "rmemu: systemctl $cmd $unit ignored (no systemd in the emulator)" ;;
+    esac
+done

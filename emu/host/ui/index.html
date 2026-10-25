@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Paper Pure Emulator</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="toolbar" role="toolbar" aria-label="Emulator controls">
+    <div class="device-name">
+      <span class="dot" id="dot" title="Disconnected"></span>
+      <span>Paper Pure</span>
+      <span class="muted" id="fw"></span>
+    </div>
+    <div class="seg" role="radiogroup" aria-label="Input tool">
+      <button role="radio" data-tool="pen" aria-checked="true" title="Pen (P)">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 17l1.2-4.2L13.5 3.5a1.8 1.8 0 012.6 0l.4.4a1.8 1.8 0 010 2.6L7.2 15.8 3 17z"/><path d="M12 5l3 3"/></svg>
+        Pen
+      </button>
+      <button role="radio" data-tool="eraser" aria-checked="false" title="Eraser (E)">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M8 17h9"/><path d="M4.5 13.5l7-7a2 2 0 012.8 0l1.2 1.2a2 2 0 010 2.8L10 16H7l-2.5-2.5z"/></svg>
+        Eraser
+      </button>
+      <button role="radio" data-tool="finger" aria-checked="false" title="Finger (F) — hold ⌥ to pinch">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M8 10V4.5a1.5 1.5 0 013 0V9l3.6.9a2 2 0 011.5 2.2l-.6 3.9H9.2L5.6 12a1.4 1.4 0 012-2l.4.4"/></svg>
+        Finger
+      </button>
+    </div>
+    <div class="actions">
+      <button id="power" title="Power button">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3v6"/><path d="M6 5.5a6 6 0 108 0"/></svg>
+        <span class="sr">Power</span>
+      </button>
+      <button id="folio" aria-pressed="false" title="Close the cover (hall sensor)">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="4" y="3" width="12" height="14" rx="1.5"/><path d="M7 3v14"/></svg>
+        <span class="sr">Folio</span>
+      </button>
+      <button id="shot" title="Save screenshot (⌘S)">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 7a2 2 0 012-2h1.5L8 3h4l1.5 2H15a2 2 0 012 2v7a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/><circle cx="10" cy="10.5" r="3"/></svg>
+        <span class="sr">Screenshot</span>
+      </button>
+      <button id="restart" title="Restart xochitl">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M16 10a6 6 0 11-1.8-4.3"/><path d="M16 3v4h-4"/></svg>
+        <span class="sr">Restart</span>
+      </button>
+      <button id="paper" aria-pressed="false" title="Paper tone: approximate how the e-ink panel looks">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 3h7l3 3v11H5z"/><path d="M12 3v3h3"/></svg>
+        <span class="sr">Paper tone</span>
+      </button>
+    </div>
+  </header>
+
+  <main class="stage" id="stage">
+    <div class="device" id="device">
+      <button class="power-key" id="powerKey" aria-label="Power button"></button>
+      <div class="screen" id="screen">
+        <canvas id="canvas" width="1404" height="1872" aria-label="Device screen"></canvas>
+        <div class="touches" id="touches" aria-hidden="true"></div>
+        <div class="offline" id="offline">
+          <p>Waiting for the device…</p>
+          <p class="muted">Start it with <code>emu/bin/ppemu start</code></p>
+        </div>
+      </div>
+      <button class="marker" id="marker" aria-pressed="false" title="Attach the Marker"></button>
+    </div>
+  </main>
+
+  <footer class="status" aria-live="polite">
+    <span id="coords">x —  y —</span>
+    <span id="rate" class="muted"></span>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

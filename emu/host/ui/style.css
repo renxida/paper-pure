@@ -1,0 +1,149 @@
+:root {
+  --backdrop-1: #2a2b2e;
+  --backdrop-2: #151617;
+  --chrome: rgba(38, 39, 42, 0.86);
+  --chrome-border: rgba(255, 255, 255, 0.08);
+  --text: #ececee;
+  --muted: #8e8f94;
+  --accent: #f2f2f0;
+  --accent-text: #161617;
+  --hover: rgba(255, 255, 255, 0.08);
+  --ok: #4cd07d;
+  --off: #6b6c70;
+  --body: #1d1e20;
+  --body-edge: #3a3b3f;
+  --screen-paper: #ffffff;
+  --radius: 10px;
+  --toolbar-h: 52px;
+  --status-h: 30px;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  background: radial-gradient(120% 90% at 50% 20%, var(--backdrop-1), var(--backdrop-2));
+  color: var(--text);
+  font: 13px/1.3 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+button { font: inherit; color: inherit; }
+code { font: 12px ui-monospace, "SF Mono", Menlo, monospace; }
+.muted { color: var(--muted); }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+
+/* ---------------------------------------------------------------- toolbar */
+
+.toolbar {
+  position: fixed; top: 10px; left: 50%; transform: translateX(-50%);
+  height: 40px; display: flex; align-items: center; gap: 14px; padding: 0 6px 0 14px;
+  background: var(--chrome); border: 1px solid var(--chrome-border); border-radius: 12px;
+  backdrop-filter: blur(18px) saturate(1.4); -webkit-backdrop-filter: blur(18px) saturate(1.4);
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35);
+  z-index: 10; white-space: nowrap;
+}
+.device-name { display: flex; align-items: center; gap: 7px; font-weight: 600; }
+.device-name .muted { font-weight: 400; font-variant-numeric: tabular-nums; }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--off); transition: background 0.2s; }
+.dot.on { background: var(--ok); box-shadow: 0 0 0 3px rgba(76, 208, 125, 0.18); }
+
+.seg { display: flex; background: rgba(0, 0, 0, 0.28); border-radius: 8px; padding: 2px; }
+.seg button {
+  display: flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px;
+  border: 0; border-radius: 6px; background: none; cursor: pointer; color: var(--muted);
+}
+.seg button:hover { color: var(--text); }
+.seg button[aria-checked="true"] { background: var(--accent); color: var(--accent-text); }
+
+.actions { display: flex; gap: 2px; }
+.actions button {
+  width: 32px; height: 32px; display: grid; place-items: center;
+  border: 0; border-radius: 8px; background: none; cursor: pointer; color: var(--text);
+}
+.actions button:hover { background: var(--hover); }
+.actions button[aria-pressed="true"] { background: var(--accent); color: var(--accent-text); }
+.actions button:active { transform: scale(0.94); }
+
+svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+button:focus-visible { outline: 2px solid #7fb4ff; outline-offset: 1px; }
+
+/* ---------------------------------------------------------------- device */
+
+.stage {
+  position: fixed; inset: calc(var(--toolbar-h) + 14px) 0 var(--status-h) 0;
+  display: grid; place-items: center;
+}
+
+/* Paper Pure: 156.4 x 208.6 mm active area (1404x1872 at 228 dpi). The
+   187 x 246 mm body is an approximation, for looks only. */
+.device {
+  --w: min(calc((100vh - var(--toolbar-h) - var(--status-h) - 44px) * 187 / 246), calc(100vw - 120px));
+  position: relative; width: var(--w); aspect-ratio: 187 / 246;
+  border-radius: calc(var(--w) * 0.035);
+  background: linear-gradient(160deg, #26272a, var(--body) 40%, #18191b);
+  box-shadow:
+    inset 0 0 0 1.5px var(--body-edge),
+    inset 0 1px 0 2px rgba(255, 255, 255, 0.05),
+    0 30px 60px -20px rgba(0, 0, 0, 0.7),
+    0 12px 24px rgba(0, 0, 0, 0.35);
+}
+.screen {
+  position: absolute;
+  left: calc(15.3 / 187 * 100%); right: calc(15.3 / 187 * 100%);
+  top: calc(18.7 / 246 * 100%); bottom: calc(18.7 / 246 * 100%);
+  background: var(--screen-paper); overflow: hidden;
+  border-radius: 2px;
+  box-shadow: 0 0 0 1px #0d0d0e, inset 0 0 6px rgba(0, 0, 0, 0.18);
+}
+canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: crosshair; }
+body[data-tool="finger"] canvas { cursor: default; }
+.screen.paper canvas { filter: sepia(0.08) saturate(0.55) contrast(0.86) brightness(0.96); }
+
+/* Power key sits on the top edge; the Marker clips to the right side. */
+.power-key {
+  position: absolute; top: -3px; left: 11%; width: 9%; height: 4px;
+  border: 0; padding: 0; border-radius: 3px 3px 0 0; background: #3b3c40; cursor: pointer;
+}
+.power-key:hover { background: #55565b; }
+.power-key:active { top: -2px; }
+.marker {
+  position: absolute; top: 18%; right: -6%; width: 2.6%; height: 58%; padding: 0; border: 0; cursor: pointer;
+  border-radius: 999px; background: linear-gradient(90deg, #2c2d30, #45464a 55%, #2a2b2e);
+  box-shadow: 0 6px 14px rgba(0, 0, 0, 0.4); opacity: 0.85;
+  transition: right 0.25s cubic-bezier(0.3, 1.4, 0.5, 1), opacity 0.2s;
+}
+.marker:hover { opacity: 1; }
+.marker[aria-pressed="true"] { right: -2.4%; opacity: 1; }
+.marker::after {
+  content: ""; position: absolute; left: 22%; right: 22%; bottom: -3%; height: 5%;
+  border-radius: 0 0 999px 999px; background: #8a8b90;
+}
+
+.touches { position: absolute; inset: 0; pointer-events: none; }
+.touch {
+  position: absolute; width: 34px; height: 34px; margin: -17px 0 0 -17px; border-radius: 50%;
+  background: rgba(60, 60, 64, 0.22); border: 1.5px solid rgba(40, 40, 44, 0.45);
+}
+
+.offline {
+  position: absolute; inset: 0; display: grid; place-content: center; text-align: center; gap: 6px;
+  background: rgba(250, 250, 248, 0.94); color: #222; font-size: 15px;
+}
+.offline p { margin: 0; }
+.offline .muted { color: #6a6a6e; font-size: 13px; }
+.offline[hidden] { display: none; }
+
+/* ---------------------------------------------------------------- status */
+
+.status {
+  position: fixed; left: 0; right: 0; bottom: 0; height: var(--status-h);
+  display: flex; justify-content: center; align-items: center; gap: 18px;
+  font: 12px ui-monospace, "SF Mono", Menlo, monospace; color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 700px) {
+  .toolbar { gap: 8px; padding-left: 10px; }
+  .device-name .muted, .seg button span { display: none; }
+  .seg button { padding: 0 8px; font-size: 0; gap: 0; }
+}

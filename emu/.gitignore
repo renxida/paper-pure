@@ -1,0 +1,11 @@
+# Firmware is downloaded by `rmemu setup` (reMarkable's, not redistributable here)
+firmware/
+*.swu
+*.ext4
+*.ext4.verity*
+rootfs/
+# Emulator runtime state: SSH key, server pid/log
+.rmemu/
+screenshot.png
+node_modules/
+.DS_Store

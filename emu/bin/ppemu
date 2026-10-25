@@ -1,0 +1,363 @@
+#!/usr/bin/env node
+// ppemu: reMarkable Paper Pure (tatsu) emulator CLI. Forked from rmemu's
+// bin/rmemu (MIT, see ../LICENSE.rmemu); same commands, Pure defaults.
+import { spawn, spawnSync } from 'node:child_process';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const state = path.join(root, '.ppemu');
+const CONTAINER = process.env.PPEMU_CONTAINER || 'pp-emu-tablet';
+const IMAGE = 'pp-emu-tatsu';    // emulator image: rootfs + shim, tagged by OS version
+const ROOTFS = 'pp-emu-rootfs';  // plain imported rootfs, tagged by OS version
+// Persistent partitions, like the device's /home (user data) and /data (system state).
+const VOLUMES = [['pp-emu-home', '/home'], ['pp-emu-data', '/data']];
+const UI = `http://127.0.0.1:${process.env.RMEMU_UI_PORT || 7777}`;
+const SSH_PORT = 2222;
+const KEY = path.join(state, 'id_ed25519');
+
+// Cedar's tablet runs 3.27.2.2. reMarkable's public update mirror (listable);
+// sha256 pinned for the versions we have checked. Any version is also checked
+// against its sw-description signature on import (tools/import-rootfs.sh).
+const DEFAULT_VERSION = '3.27.2.2';
+const MIRROR = 'https://remarkable-software.s3.us-east-2.amazonaws.com/';
+const PINNED = {
+  '3.27.2.2': '2c64bea8d89ebd2eb81f84485db97bec36dd4bd1fcfbb13e99e0c3ca446a997d',
+  '3.27.1.0': '7008c8376e49a65b766bbd672f83454d55290af73b099bba396f3d9b2276ce3f',
+};
+const swuName = (v) => `remarkable-production-image-${v}-tatsu-public.swu`;
+
+// x86 hosts run the arm64 device under qemu-user: boot takes about a minute
+// and the UI reacts seconds after input, so wait longer. PPEMU_SLOW=1/0 forces it.
+const SLOW = process.env.PPEMU_SLOW ? process.env.PPEMU_SLOW === '1' : process.arch !== 'arm64';
+const T = (fast, slow) => (SLOW ? slow : fast);
+
+const HELP = `ppemu — reMarkable Paper Pure (tatsu) emulator
+
+Lifecycle
+  setup [version] [--swu FILE]   get firmware (default ${DEFAULT_VERSION}), verify it, build ${IMAGE}:<version>
+  start [version]           boot the emulator and the simulator UI
+  stop                      shut it down (device data is kept)
+  rebuild                   rebuild the image from shim/daemon/docker changes and reboot (data kept)
+  reset                     stop and wipe device data (factory reset)
+  status                    what's running
+  open                      open the simulator UI in a browser
+  versions                  list Paper Pure firmware on reMarkable's mirror
+
+Drive it (coordinates are device pixels, portrait 1404x1872)
+  screenshot [file] [--scale 0.5]
+  tap X Y [--pen|--eraser]
+  longpress X Y [--ms 900]
+  swipe X0 Y0 X1 Y1 [--ms 300] [--pen]
+  draw X,Y X,Y ... [--pressure 0.6] [--eraser] [--ms N]
+  pinch CX CY R0 R1 [--ms 400]
+  power                     press the power button
+  folio open|close          hall sensor (cover)
+  marker dock|undock        attach the Marker to the side (charges it) or take it off
+  usb connect|disconnect    USB-C power
+  battery PERCENT           set the battery level
+  wait [--idle 400] [--timeout 10000]   until the screen and panel stop changing
+  skip-setup                mark first-boot onboarding done (fresh devices boot to My files)
+
+Develop
+  ssh [cmd...]              like ssh root@10.11.99.1 on a dev-mode device
+  push LOCAL REMOTE         copy into the device
+  pull REMOTE LOCAL         copy out of the device
+  restart [--debug]         restart xochitl (--debug: with shim tracing of every hardware access)
+  logs [-f]                 container log
+
+Env: PPEMU_FIRMWARE_DIR (extra place to look for .swu files), PPEMU_CONTAINER,
+PPEMU_SLOW=1|0 (qemu-user timing; default on for non-arm64 hosts).
+`;
+
+// ---------------------------------------------------------------- helpers
+
+const args = process.argv.slice(2);
+const cmd = args.shift();
+const flags = {};
+const pos = [];
+for (let i = 0; i < args.length; i++) {
+  const a = args[i];
+  if (a.startsWith('--')) {
+    const k = a.slice(2);
+    if (i + 1 < args.length && !args[i + 1].startsWith('--') && /^(scale|ms|pressure|idle|timeout|swu)$/.test(k)) flags[k] = args[++i];
+    else flags[k] = true;
+  } else if (a === '-f') flags.follow = true;
+  else pos.push(a);
+}
+
+function die(msg) { console.error(`ppemu: ${msg}`); process.exit(1); }
+function sh(cmd, argv, opts = {}) {
+  const r = spawnSync(cmd, argv, { stdio: opts.capture ? ['ignore', 'pipe', 'pipe'] : 'inherit', encoding: 'utf8', ...opts });
+  if (r.error) die(`${cmd}: ${r.error.message}`);
+  return r;
+}
+const docker = (argv, opts) => sh('docker', argv, opts);
+const dockerOut = (argv) => docker(argv, { capture: true }).stdout.trim();
+const vkey = (v) => v.split('.').map(Number);
+const byVersion = (a, b) => { const x = vkey(a), y = vkey(b); for (let i = 0; i < 4; i++) if (x[i] !== y[i]) return x[i] - y[i]; return 0; };
+const newest = (vs) => [...vs].sort(byVersion).at(-1);
+
+function containerState() {
+  const r = docker(['inspect', '-f', '{{.State.Running}} {{.Config.Image}}', CONTAINER], { capture: true });
+  if (r.status) return null;
+  const [running, image] = r.stdout.trim().split(' ');
+  return { running: running === 'true', image };
+}
+function images() {
+  return dockerOut(['images', IMAGE, '--format', '{{.Tag}}']).split('\n').filter((t) => /^\d+(\.\d+){3}$/.test(t));
+}
+
+async function api(p, body) {
+  const res = await fetch(UI + p, body === undefined ? {} : { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    .catch(() => die('emulator is not running (ppemu start)'));
+  if (!res.ok) die(`${p}: ${res.status} ${await res.text()}`);
+  return res;
+}
+const gesture = async (g) => { const r = await (await api('/api/gesture', g)).json(); console.log(r.changed ? 'ok (screen changed)' : 'ok (no screen change)'); };
+const num = (s, name) => { const n = Number(s); if (!Number.isFinite(n)) die(`expected a number for ${name}, got ${s}`); return n; };
+const tool = () => (flags.eraser ? 'eraser' : flags.pen ? 'pen' : 'finger');
+const status = () => fetch(UI + '/api/status').then((r) => r.json()).catch(() => ({}));
+
+// ---------------------------------------------------------------- setup
+
+function sha256(file) {
+  const h = crypto.createHash('sha256');
+  const fd = fs.openSync(file, 'r');
+  const buf = Buffer.alloc(1 << 20);
+  for (let n; (n = fs.readSync(fd, buf, 0, buf.length, null)) > 0;) h.update(buf.subarray(0, n));
+  fs.closeSync(fd);
+  return h.digest('hex');
+}
+
+function checkPinned(version, file, onFail = () => {}) {
+  const want = PINNED[version];
+  if (!want) { console.error(`ppemu: ${version} has no pinned sha256; relying on the signature check alone`); return; }
+  const have = sha256(file);
+  if (have !== want) { onFail(); die(`${file}: sha256 ${have} does not match the pinned ${want}`); }
+}
+
+// Firmware is reMarkable's: fetched for local use only, never committed.
+function getFirmware(version) {
+  if (flags.swu) {
+    const file = path.resolve(flags.swu);
+    if (!fs.existsSync(file)) die(`no such file: ${file}`);
+    version = path.basename(file).match(/image-(\d+(?:\.\d+){3})-tatsu/)?.[1] || die(`${file}: not a Paper Pure (tatsu) .swu`);
+    checkPinned(version, file);
+    return { version, file };
+  }
+  version ||= DEFAULT_VERSION;
+  const name = swuName(version);
+  for (const dir of [path.join(root, 'firmware'), process.env.PPEMU_FIRMWARE_DIR].filter(Boolean)) {
+    const file = path.join(dir, name);
+    if (fs.existsSync(file)) { checkPinned(version, file); return { version, file }; }
+  }
+  const dir = path.join(root, 'firmware');
+  fs.mkdirSync(dir, { recursive: true });
+  const dest = path.join(dir, name);
+  console.error(`Downloading reMarkable's firmware ${version} for local use; it is subject to reMarkable's terms.`);
+  // curl honours HTTPS_PROXY and shows progress; Node's fetch does neither by default.
+  if (sh('curl', ['-fL', '--retry', '3', '-o', dest + '.part', MIRROR + name]).status) { fs.rmSync(dest + '.part', { force: true }); die(`download failed: ${MIRROR + name}`); }
+  checkPinned(version, dest + '.part', () => fs.rmSync(dest + '.part'));
+  fs.renameSync(dest + '.part', dest);
+  return { version, file: dest };
+}
+
+function buildImage(version) {
+  console.log(`building ${IMAGE}:${version}...`);
+  if (docker(['build', '-q', '--build-arg', `ROOTFS=${ROOTFS}:${version}`, '-t', `${IMAGE}:${version}`, '-f', path.join(root, 'docker/Dockerfile'), root]).status)
+    die('image build failed');
+}
+
+function setup(version) {
+  const fw = getFirmware(version);
+  if (!dockerOut(['images', '-q', `${ROOTFS}:${fw.version}`])) {
+    console.log(`importing rootfs ${fw.version} (checks the update signature)...`);
+    if (sh(path.join(root, 'tools/import-rootfs.sh'), [fw.file]).status) die('rootfs import failed');
+  }
+  buildImage(fw.version);
+  return fw.version;
+}
+
+// ---------------------------------------------------------------- lifecycle
+
+function serverPid() {
+  try {
+    const pid = Number(fs.readFileSync(path.join(state, 'server.pid'), 'utf8'));
+    process.kill(pid, 0);
+    return pid;
+  } catch { return null; }
+}
+
+async function waitFor(check, ms) {
+  for (const end = Date.now() + ms; Date.now() < end; await new Promise((r) => setTimeout(r, 200))) if (await check()) return true;
+  return false;
+}
+
+function installKey() {
+  if (!fs.existsSync(KEY)) sh('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-C', 'ppemu', '-f', KEY]);
+  const pub = fs.readFileSync(KEY + '.pub', 'utf8').trim();
+  docker(['exec', CONTAINER, 'sh', '-c', `mkdir -p /home/root/.ssh && chmod 700 /home/root/.ssh && touch /home/root/.ssh/authorized_keys && (grep -qF "${pub}" /home/root/.ssh/authorized_keys || echo "${pub}" >> /home/root/.ssh/authorized_keys) && chmod 600 /home/root/.ssh/authorized_keys`], { capture: true });
+}
+
+function runContainer(version) {
+  const r = docker(['run', '-d', '--name', CONTAINER, '--platform', 'linux/arm64', '--hostname', 'imx93-tatsu',
+    '-p', '127.0.0.1:8888:8888', '-p', `127.0.0.1:${SSH_PORT}:22`, ...VOLUMES.flatMap(([v, p]) => ['-v', `${v}:${p}`]), `${IMAGE}:${version}`], { capture: true });
+  if (r.status) die(r.stderr);
+}
+
+async function start(version) {
+  fs.mkdirSync(state, { recursive: true });
+  let c = containerState();
+  if (c && version && c.image !== `${IMAGE}:${version}`) { docker(['rm', '-f', CONTAINER], { capture: true }); c = null; }
+  if (!c) {
+    version ||= images().includes(DEFAULT_VERSION) ? DEFAULT_VERSION : newest(images());
+    if (!version) version = setup();
+    else if (!images().includes(version)) setup(version);
+    runContainer(version);
+  } else if (!c.running) docker(['start', CONTAINER], { capture: true });
+  installKey();
+  if (!serverPid()) {
+    const log = fs.openSync(path.join(state, 'server.log'), 'a');
+    const child = spawn(process.execPath, [path.join(root, 'host/server.mjs')], { detached: true, stdio: ['ignore', log, log], env: { ...process.env, PPEMU_CONTAINER: CONTAINER } });
+    fs.writeFileSync(path.join(state, 'server.pid'), String(child.pid));
+    child.unref();
+  }
+  const up = await waitFor(async () => (await status()).connected, T(30000, 180000));
+  // A fresh boot shows the splash first; don't hand over until the UI is up.
+  if (up && !c?.running) await fetch(UI + `/api/wait?idle=${T(1500, 5000)}&min=${T(4000, 25000)}&timeout=${T(20000, 180000)}`).catch(() => {});
+  console.log(up ? `Paper Pure emulator running — ${UI}${SLOW ? ' (qemu-user: slow, be patient)' : ''}` : `server up at ${UI}, but the device hasn't connected yet (ppemu logs)`);
+  console.log(`ssh: ppemu ssh   (or: ssh -i ${path.relative(process.cwd(), KEY)} -p ${SSH_PORT} root@127.0.0.1)`);
+}
+
+function stop() {
+  const pid = serverPid();
+  if (pid) process.kill(pid);
+  fs.rmSync(path.join(state, 'server.pid'), { force: true });
+  if (containerState()) docker(['stop', '-t', '5', CONTAINER], { capture: true });
+  console.log('stopped');
+}
+
+// ---------------------------------------------------------------- commands
+
+const sshArgs = ['-i', KEY, '-p', String(SSH_PORT), '-o', 'StrictHostKeyChecking=no', '-o', 'UserKnownHostsFile=/dev/null', '-o', 'LogLevel=ERROR'];
+
+const commands = {
+  setup() { console.log(`ready: ${IMAGE}:${setup(pos[0])}`); },
+  start: () => start(pos[0]),
+  stop,
+  async rebuild() {
+    const version = containerState()?.image?.split(':')[1] || DEFAULT_VERSION;
+    buildImage(version);
+    stop();
+    docker(['rm', '-f', CONTAINER], { capture: true });
+    await start(version);
+  },
+  async reset() {
+    stop();
+    docker(['rm', '-f', CONTAINER], { capture: true });
+    docker(['volume', 'rm', ...VOLUMES.map(([v]) => v)], { capture: true });
+    console.log('device data wiped');
+  },
+  async status() {
+    const c = containerState();
+    const s = await fetch(UI + '/api/status').then((r) => r.json()).catch(() => null);
+    console.log(`container: ${c ? `${CONTAINER} ${c.running ? 'running' : 'stopped'} (${c.image})` : 'none'}`);
+    console.log(`ui server: ${s ? `${UI} (device ${s.connected ? 'connected' : 'not connected'}, firmware ${s.firmware ?? '?'})` : 'not running'}`);
+    console.log(`images:    ${images().join(', ') || 'none (ppemu setup)'}`);
+    console.log(`host:      ${process.arch}${SLOW ? ' (device runs under qemu-user: slow)' : ''}`);
+  },
+  open() { sh(process.platform === 'darwin' ? 'open' : 'xdg-open', [UI]); },
+  versions() {
+    const r = sh('curl', ['-fsS', `${MIRROR}?prefix=remarkable-production-image-`], { capture: true });
+    if (r.status) die(`cannot list ${MIRROR}: ${r.stderr.trim()}`);
+    const vs = [...r.stdout.matchAll(/<Key>remarkable-production-image-(\d+(?:\.\d+){3})-tatsu-public\.swu<\/Key>/g)].map((m) => m[1]).sort(byVersion);
+    for (const v of vs) console.log(`${v}${PINNED[v] ? '  (sha256 pinned)' : ''}${v === DEFAULT_VERSION ? '  (default: Cedar\'s tablet)' : ''}`);
+  },
+
+  async screenshot() {
+    const file = pos[0] || 'screenshot.png';
+    const res = await api(`/api/screenshot.png?scale=${flags.scale || 1}`);
+    fs.writeFileSync(file, Buffer.from(await res.arrayBuffer()));
+    const f = Number(res.headers.get('x-rmemu-factor'));
+    console.log(`${file} (${res.headers.get('x-rmemu-size')}${f > 1 ? `; multiply by ${f} for device coordinates` : ''})`);
+  },
+  tap: () => gesture({ op: 'tap', x: num(pos[0], 'X'), y: num(pos[1], 'Y'), tool: tool() }),
+  longpress: () => gesture({ op: 'longpress', x: num(pos[0], 'X'), y: num(pos[1], 'Y'), ms: flags.ms && Number(flags.ms), tool: tool() }),
+  swipe: () => gesture({ op: 'swipe', x0: num(pos[0], 'X0'), y0: num(pos[1], 'Y0'), x1: num(pos[2], 'X1'), y1: num(pos[3], 'Y1'), ms: flags.ms && Number(flags.ms), tool: tool() }),
+  draw() {
+    const points = pos.map((p) => p.split(',').map(Number));
+    if (points.length < 2 || points.some((p) => p.length !== 2 || p.some((n) => !Number.isFinite(n)))) die('draw needs at least two X,Y points');
+    return gesture({ op: 'draw', points, pressure: flags.pressure && Number(flags.pressure), eraser: !!flags.eraser, ms: flags.ms && Number(flags.ms) });
+  },
+  pinch: () => gesture({ op: 'pinch', cx: num(pos[0], 'CX'), cy: num(pos[1], 'CY'), r0: num(pos[2], 'R0'), r1: num(pos[3], 'R1'), ms: flags.ms && Number(flags.ms) }),
+  power: () => gesture({ op: 'key', key: 'power' }),
+  folio() {
+    if (!['open', 'close'].includes(pos[0])) die('folio open|close');
+    return gesture({ op: 'folio', open: pos[0] === 'open' });
+  },
+  marker() {
+    if (!['dock', 'undock'].includes(pos[0])) die('marker dock|undock');
+    return gesture({ op: 'marker', docked: pos[0] === 'dock' });
+  },
+  usb() {
+    if (!['connect', 'disconnect'].includes(pos[0])) die('usb connect|disconnect');
+    return gesture({ op: 'usb', connected: pos[0] === 'connect' });
+  },
+  battery: () => gesture({ op: 'battery', percent: num(pos[0], 'PERCENT') }),
+  async ['skip-setup']() {
+    // The same state the onboarding flow leaves behind: SetupState in xochitl's
+    // settings, Setup=false in /data/xochitl.conf and the "unboxed" marker.
+    // xochitl rewrites its settings on exit, so edit them while it's stopped.
+    const script = String.raw`
+      systemctl stop xochitl
+      while pidof xochitl >/dev/null; do sleep 0.1; done
+      conf=/home/root/.config/remarkable/xochitl.conf
+      mkdir -p "$(dirname "$conf")"
+      [ -f "$conf" ] || printf '[General]\n' > "$conf"
+      if grep -q '^SetupState=' "$conf"; then sed -i 's/^SetupState=.*/SetupState=Intro/' "$conf"
+      else sed -i '/^\[General\]$/a SetupState=Intro' "$conf"; fi
+      [ -f /data/unboxed ] || date > /data/unboxed
+      printf '[General]\nSetup=false\n' > /data/xochitl.conf
+      systemctl start xochitl`;
+    if (docker(['exec', CONTAINER, 'sh', '-c', script]).status) die('could not update device settings');
+    await waitFor(async () => (await status()).connected, T(20000, 120000));
+    await api(`/api/wait?idle=${T(1500, 5000)}&min=${T(4000, 25000)}&timeout=${T(20000, 180000)}`);  // past the boot splash
+    console.log('onboarding skipped; xochitl restarted');
+  },
+  async wait() {
+    const r = await (await api(`/api/wait?idle=${flags.idle || T(400, 1200)}&timeout=${flags.timeout || T(10000, 30000)}`)).json();
+    console.log(r.timedOut ? 'timed out (screen still changing)' : 'idle');
+  },
+
+  ssh() {
+    if (!containerState()?.running) die('emulator is not running (ppemu start)');
+    process.exit(sh('ssh', [...sshArgs, ...(pos.length ? [] : ['-t']), 'root@127.0.0.1', ...pos]).status ?? 1);
+  },
+  push() {
+    if (pos.length !== 2) die('push LOCAL REMOTE');
+    process.exit(docker(['cp', pos[0], `${CONTAINER}:${pos[1]}`]).status ?? 1);
+  },
+  pull() {
+    if (pos.length !== 2) die('pull REMOTE LOCAL');
+    process.exit(docker(['cp', `${CONTAINER}:${pos[0]}`, pos[1]]).status ?? 1);
+  },
+  restart() {
+    docker(['exec', CONTAINER, 'sh', '-c', `${flags.debug ? 'touch' : 'rm -f'} /run/rmemu-debug; systemctl restart xochitl`]);
+    console.log(`xochitl restarting${flags.debug ? ' with shim tracing (ppemu logs -f)' : ''}`);
+  },
+  logs() {
+    const child = spawn('docker', ['logs', ...(flags.follow ? ['-f'] : []), '--tail', '300', CONTAINER], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const filter = (d) => d.toString().split('\n').filter((l) => !l.includes('Could not open bin file')).join('\n');
+    child.stdout.on('data', (d) => process.stdout.write(filter(d)));
+    child.stderr.on('data', (d) => process.stdout.write(filter(d)));
+  },
+};
+
+if (!cmd || cmd === 'help' || flags.help || !commands[cmd]) {
+  console.log(HELP);
+  process.exit(cmd && cmd !== 'help' && !flags.help ? 1 : 0);
+}
+await commands[cmd]();
