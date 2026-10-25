@@ -4,12 +4,14 @@
 #   pp-agent          (out/pp-agent-arm64)
 #   release.pub.pem   (Cedar's release public key)
 #   agent.json        (optional; kept if one is already installed)
-#   systemd/          (pp-agent-boot.service, pp-agent.service, pp-agent.timer)
+#   systemd/          (pp-agent-boot.service, pp-agent.service, pp-agent.timer,
+#                      pp-agent-tripletap.service)
 #
 #   bash install.sh             copy files into /home/root/paper-pure
 #   bash install.sh --runtime   ...and start the units from /run (gone at
 #                               reboot; a safe first try, no rootfs change)
 #
+# Only cp, chmod and mv: the tablet has no install(1).
 # Making the units survive reboot means writing them under the real /etc
 # (the /etc overlay's upper layer is tmpfs). That step belongs to the
 # device setup; see agent/README.md "What the device lane wires up".
@@ -22,20 +24,30 @@ if ! grep -qi tatsu /proc/device-tree/model 2>/dev/null; then
     echo "warning: this does not look like a Paper Pure (tatsu)" >&2
 fi
 
-install -d -m 0755 "$ROOT" "$ROOT/bin" "$ROOT/keys" "$ROOT/systemd"
-install -m 0755 "$HERE/pp-agent" "$ROOT/bin/pp-agent.new"
-mv -f "$ROOT/bin/pp-agent.new" "$ROOT/bin/pp-agent"
-install -m 0644 "$HERE/release.pub.pem" "$ROOT/keys/release.pub.pem"
+put() { # src dst mode: copy beside, then rename, so a reader never sees half a file
+    cp "$1" "$2.new"
+    chmod "$3" "$2.new"
+    mv -f "$2.new" "$2"
+}
+
+mkdir -p "$ROOT" "$ROOT/bin" "$ROOT/keys" "$ROOT/systemd"
+chmod 0755 "$ROOT" "$ROOT/bin" "$ROOT/keys" "$ROOT/systemd"
+put "$HERE/pp-agent" "$ROOT/bin/pp-agent" 0755
+put "$HERE/release.pub.pem" "$ROOT/keys/release.pub.pem" 0644
 if [ -f "$HERE/agent.json" ] && [ ! -f "$ROOT/agent.json" ]; then
-    install -m 0600 "$HERE/agent.json" "$ROOT/agent.json"
+    put "$HERE/agent.json" "$ROOT/agent.json" 0600
 fi
-install -m 0644 "$HERE"/systemd/pp-agent* "$ROOT/systemd/"
+for u in "$HERE"/systemd/pp-agent*; do
+    put "$u" "$ROOT/systemd/$(basename "$u")" 0644
+done
 "$ROOT/bin/pp-agent" version
 
 if [ "${1:-}" = "--runtime" ]; then
-    install -m 0644 "$ROOT"/systemd/pp-agent* /run/systemd/system/
+    for u in "$ROOT"/systemd/pp-agent*; do
+        put "$u" "/run/systemd/system/$(basename "$u")" 0644
+    done
     systemctl daemon-reload
-    systemctl start pp-agent.timer
+    systemctl start pp-agent.timer pp-agent-tripletap.service
     echo "units started from /run/systemd/system (until reboot)"
     systemctl list-timers pp-agent.timer --no-pager || true
 fi

@@ -1,0 +1,20 @@
+# The human kill switch: triple-press power toggles mods (pp-agent toggle).
+# Starts after pp-agent-boot, so after rm-sanity has cleared the boot ROM's
+# error count (device lane drop-in). Runs even when paper-pure/disable
+# exists: then a triple-press can only turn mods off.
+[Unit]
+Description=paper-pure agent: triple-press power toggles mods
+RequiresMountsFor=/home/root/paper-pure
+After=pp-agent-boot.service
+ConditionPathExists=/home/root/paper-pure/bin/pp-agent
+
+[Service]
+ExecStart=/home/root/paper-pure/bin/pp-agent tripletap
+Restart=always
+RestartSec=5
+# Room for an ExecStartPre that waits for rm-sanity (device lane).
+TimeoutStartSec=10min
+TimeoutStopSec=15s
+
+[Install]
+WantedBy=multi-user.target

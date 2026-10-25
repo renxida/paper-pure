@@ -34,7 +34,21 @@ func newHTTPClient(c Config) (*http.Client, error) {
 		}
 		tr.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
 	}
-	return &http.Client{Transport: tr}, nil
+	// Never follow redirects. Behind Cloudflare Access a refused token gets
+	// a 302 to a login page; following it would turn a status POST into a
+	// GET that returns 200 and looks like success. A 3xx is an error.
+	noRedirect := func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &http.Client{Transport: tr, CheckRedirect: noRedirect}, nil
+}
+
+// httpError describes a non-success response; a redirect names where it
+// pointed, because that is almost always an access login page.
+func httpError(method, url string, resp *http.Response) error {
+	if resp.StatusCode/100 == 3 {
+		return fmt.Errorf("%s %s: %s to %q, not followed (Cloudflare Access refusing the token?)",
+			method, url, resp.Status, resp.Header.Get("Location"))
+	}
+	return fmt.Errorf("%s %s: %s", method, url, resp.Status)
 }
 
 func (a *Agent) newRequest(ctx context.Context, method, url string, body io.Reader) (*http.Request, error) {
@@ -61,7 +75,7 @@ func (a *Agent) getSmall(ctx context.Context, url string) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GET %s: %s", url, resp.Status)
+		return nil, httpError("GET", url, resp)
 	}
 	return io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 }
@@ -100,7 +114,7 @@ func (a *Agent) download(ctx context.Context, url, part string, size int64, sha 
 			flags |= os.O_TRUNC
 			off = 0
 		default:
-			return fmt.Errorf("GET %s: %s", url, resp.Status)
+			return httpError("GET", url, resp)
 		}
 		f, err := os.OpenFile(part, flags, 0o644)
 		if err != nil {

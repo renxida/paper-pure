@@ -116,9 +116,24 @@ func newHarness(t *testing.T) *harness {
 	c.ProcDir = filepath.Join(dir, "proc")
 	c.StableSeconds, c.PollMillis = 3, 500
 	c.HookTimeout, c.CheckTimeout = 5, 5
+	c.RunDir = filepath.Join(dir, "run")
+	// Only `systemctl reset-failed` is ever run for real (Probe fakes `show`).
+	c.Systemctl = filepath.Join(dir, "systemctl")
+	write(t, c.Systemctl, "#!/bin/sh\necho \"$*\" >> \"$PP_TEST_DIR/systemctl.log\"\n")
+	os.Chmod(c.Systemctl, 0o755)
 	h.cfg = c
 	return h
 }
+
+// live is the live marker ("" = mods off); reboot clears it like a tmpfs.
+func (h *harness) live() string {
+	b, _ := os.ReadFile(filepath.Join(h.cfg.RunDir, "live"))
+	return strings.TrimSpace(string(b))
+}
+
+func (h *harness) reboot() { os.RemoveAll(h.cfg.RunDir) }
+
+func (h *harness) toggle() error { return h.agent().Toggle(context.Background()) }
 
 func (h *harness) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
@@ -530,6 +545,7 @@ func TestGates(t *testing.T) {
 
 func TestBootGuard(t *testing.T) {
 	h := newHarness(t)
+	h.cfg.ActivateOnBoot = true
 	h.cfg.BootGuardMax = 3
 	h.publish("r1", nil, nil)
 	if err := h.update(); err != nil {
@@ -577,6 +593,7 @@ func TestBootGuard(t *testing.T) {
 
 func TestBootCountIsOnDiskBeforeActivate(t *testing.T) {
 	h := newHarness(t)
+	h.cfg.ActivateOnBoot = true
 	h.publish("r1", nil, nil)
 	if err := h.update(); err != nil {
 		t.Fatal(err)
@@ -600,6 +617,7 @@ cp "$PP_ROOT/state/state.json" "$PP_TEST_DIR/snapshot.json"
 
 func TestBootRefusesWhenOSChanged(t *testing.T) {
 	h := newHarness(t)
+	h.cfg.ActivateOnBoot = true
 	h.publish("r1", nil, nil)
 	if err := h.update(); err != nil {
 		t.Fatal(err)
@@ -613,6 +631,7 @@ func TestBootRefusesWhenOSChanged(t *testing.T) {
 
 func TestRebootDuringHealthCheckRollsBackAtBoot(t *testing.T) {
 	h := newHarness(t)
+	h.cfg.ActivateOnBoot = true
 	h.publish("good", nil, nil)
 	if err := h.update(); err != nil {
 		t.Fatal(err)

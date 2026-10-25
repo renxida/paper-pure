@@ -158,15 +158,38 @@ func (a *Agent) runScript(ctx context.Context, path, id, reason string, timeout 
 	return nil
 }
 
+// runHook runs one hook and keeps the live marker: set before activate
+// (from then on mods may be live), cleared once deactivate succeeds.
 func (a *Agent) runHook(ctx context.Context, id, hook, reason string) error {
 	if id == "" {
 		return nil
 	}
-	p := filepath.Join(a.cfg.releaseDir(id), "hooks", hook)
-	if _, err := os.Stat(p); err != nil {
-		return nil
+	if hook == HookActivate {
+		a.setLive(id)
 	}
-	return a.runScript(ctx, p, id, reason, time.Duration(a.cfg.HookTimeout)*time.Second)
+	p := filepath.Join(a.cfg.releaseDir(id), "hooks", hook)
+	var err error
+	if _, serr := os.Stat(p); serr == nil {
+		a.resetFailed(ctx)
+		err = a.runScript(ctx, p, id, reason, time.Duration(a.cfg.HookTimeout)*time.Second)
+	}
+	if hook == HookDeactivate && err == nil {
+		a.clearLive()
+	}
+	return err
+}
+
+// resetFailed zeroes xochitl's start-limit counter before every hook.
+// Stock xochitl has StartLimitBurst=4 in 600 s and OnFailure=emergency.target
+// (rm-emergency.sh reboots). Our own deliberate restarts must not use up
+// that budget, so the 4 starts are left for crashes and the health check
+// gets to roll back first.
+func (a *Agent) resetFailed(ctx context.Context) {
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	if out, err := exec.CommandContext(ctx, a.cfg.Systemctl, "reset-failed", a.cfg.XochitlUnit).CombinedOutput(); err != nil {
+		a.logf("systemctl reset-failed %s: %v %s", a.cfg.XochitlUnit, err, strings.TrimSpace(string(out)))
+	}
 }
 
 // runChecks runs the built-in checks, then the release's checks/* in order.

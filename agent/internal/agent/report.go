@@ -18,7 +18,9 @@ type Status struct {
 	AgentVersion   string    `json:"agent_version"`
 	Time           time.Time `json:"time"`
 	OSVersion      string    `json:"os_version"`
-	Release        string    `json:"release"`   // what `current` points at ("" = stock)
+	Release        string    `json:"release"`   // what `current` points at
+	Live           string    `json:"live"`      // release with mods on now ("" = stock UI)
+	Disabled       bool      `json:"disabled"`  // kill switch file present
 	Committed      string    `json:"committed"` // last healthy release
 	Previous       string    `json:"previous"`
 	Pending        string    `json:"pending,omitempty"`
@@ -45,6 +47,8 @@ func (a *Agent) status() Status {
 		Time:           a.now().UTC(),
 		OSVersion:      a.osVersion,
 		Release:        a.linkTarget(),
+		Live:           a.live(),
+		Disabled:       a.disabled(),
 		Committed:      s.Current,
 		Previous:       s.Previous,
 		Pending:        s.Pending,
@@ -82,7 +86,7 @@ func (a *Agent) report(ctx context.Context) {
 	io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
 	resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
-		a.logf("report: %s", resp.Status)
+		a.logf("report: %v", httpError("POST", a.cfg.StatusURL, resp))
 	}
 }
 

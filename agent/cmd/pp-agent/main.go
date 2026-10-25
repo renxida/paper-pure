@@ -22,6 +22,9 @@ const usage = `usage: pp-agent [-config FILE] COMMAND
   boot         once per boot: finish an interrupted install, apply the
                boot-loop guard, activate the current release, report
   status       print state as JSON
+  toggle       what a triple-press does: mods off if they are on, else turn
+               the current release on (activate + health check)
+  tripletap    watch the power key, toggle on three presses (a service)
   rollback     reinstall the previous release (manual undo)
   reset-guard  clear the boot-loop guard
   report       send status to the server now
@@ -61,6 +64,10 @@ func main() {
 		}
 	case "boot":
 		err = a.Boot(ctx)
+	case "toggle":
+		err = a.Toggle(ctx)
+	case "tripletap":
+		err = a.TripleTap(ctx)
 	case "rollback":
 		err = a.Rollback(ctx)
 	case "reset-guard":

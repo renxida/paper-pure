@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -95,15 +97,26 @@ func (a *Agent) lock(wait bool) error {
 		}
 		return err
 	}
+	// The holder's PID, so a triple-press can stop a busy run (Toggle).
+	f.Truncate(0)
+	f.WriteAt([]byte(strconv.Itoa(os.Getpid())+"\n"), 0)
 	a.lockFile = f
 	return nil
 }
 
 func (a *Agent) unlock() {
 	if a.lockFile != nil {
+		a.lockFile.Truncate(0)
 		a.lockFile.Close()
 		a.lockFile = nil
 	}
+}
+
+// lockHolder is the PID of the run holding the lock, or 0.
+func (a *Agent) lockHolder() int {
+	b, _ := os.ReadFile(filepath.Join(a.cfg.stateDir(), "lock"))
+	pid, _ := strconv.Atoi(strings.TrimSpace(string(b)))
+	return pid
 }
 
 // begin takes the lock and loads state; end saves and reports.
@@ -111,6 +124,10 @@ func (a *Agent) begin(wait bool) error {
 	if err := a.lock(wait); err != nil {
 		return err
 	}
+	return a.load()
+}
+
+func (a *Agent) load() error {
 	st, err := loadState(a.statePath())
 	if err != nil {
 		a.unlock()
@@ -119,6 +136,28 @@ func (a *Agent) begin(wait bool) error {
 	a.st = st
 	return nil
 }
+
+// disabled: the kill switch file exists. Nothing turns mods on then.
+func (a *Agent) disabled() bool {
+	_, err := os.Stat(a.cfg.disableFile())
+	return err == nil
+}
+
+// live is the release whose activate hook ran last and whose deactivate
+// hook has not succeeded since ("" = stock). It lives in RunDir, a tmpfs,
+// so a reboot clears it, just as a reboot clears xovi's drop-in.
+func (a *Agent) live() string {
+	b, _ := os.ReadFile(a.cfg.liveFile())
+	return strings.TrimSpace(string(b))
+}
+
+func (a *Agent) setLive(id string) {
+	if err := os.MkdirAll(a.cfg.RunDir, 0o755); err == nil {
+		err = os.WriteFile(a.cfg.liveFile(), []byte(id+"\n"), 0o644)
+	}
+}
+
+func (a *Agent) clearLive() { os.Remove(a.cfg.liveFile()) }
 
 func (a *Agent) end(ctx context.Context, result string, err error) error {
 	a.st.LastRun = a.now().UTC()
@@ -206,6 +245,13 @@ func (a *Agent) install(ctx context.Context, m *release.Manifest, reason string)
 		return err
 	}
 	if err := a.activate(ctx, m.ID, reason, m); err != nil {
+		if ctx.Err() != nil {
+			// Stopped mid-check (shutdown, e.g. the OS's emergency reboot,
+			// or a triple-press). Don't run hooks against a stopping system:
+			// Pending stays set and the next run rolls back, as after a
+			// power cut.
+			return fmt.Errorf("release %s interrupted before its health check passed; the next run rolls it back: %w", m.ID, err)
+		}
 		a.rollback(ctx, m.ID, err.Error(), true)
 		return fmt.Errorf("release %s unhealthy, rolled back to %s: %w", m.ID, orStock(old), err)
 	}
@@ -241,7 +287,7 @@ func (a *Agent) rollback(ctx context.Context, bad, why string, reactivate bool) 
 		a.logf("flip back failed: %v", err)
 	}
 	msg := "rolled back to " + orStock(good) + ": " + why
-	if reactivate && good != "" && !a.st.GuardTripped {
+	if reactivate && good != "" && !a.st.GuardTripped && !a.disabled() {
 		m, err := a.loadManifest(good)
 		if err == nil {
 			err = a.activate(ctx, good, "rollback", m)
@@ -320,6 +366,9 @@ func (a *Agent) Update(ctx context.Context) error {
 }
 
 func (a *Agent) update(ctx context.Context) (string, error) {
+	if a.disabled() {
+		return "skipped: kill switch " + a.cfg.disableFile() + " exists", nil
+	}
 	if a.cfg.FeedURL == "" {
 		return "no feed_url, nothing to do", nil
 	}
@@ -441,8 +490,10 @@ func (a *Agent) boot(ctx context.Context) (string, error) {
 	case id == "":
 		a.st.UnhealthyBoots = 0
 		return "boot: stock (no release installed)", nil
+	case a.disabled():
+		return "boot: kill switch " + a.cfg.disableFile() + " exists, staying stock", nil
 	case !a.cfg.ActivateOnBoot:
-		return "boot: activate_on_boot is off, staying stock", nil
+		return "boot: stock (activate_on_boot is off; triple-press turns " + id + " on)", nil
 	case a.st.GuardTripped:
 		return fmt.Sprintf("boot: guard tripped, staying stock until a new release passes (%s not activated)", id), nil
 	}
@@ -485,6 +536,9 @@ func (a *Agent) Rollback(ctx context.Context) error {
 	}
 	a.recover(ctx, true)
 	bad, prev := a.st.Current, a.st.Previous
+	if a.disabled() {
+		return a.end(ctx, "rollback: refused", fmt.Errorf("kill switch %s exists; remove it first", a.cfg.disableFile()))
+	}
 	if prev == "" {
 		return a.end(ctx, "rollback: no previous release", errors.New("no previous release on disk"))
 	}
