@@ -80,7 +80,7 @@ The same steps for the emulator and the tablet, all over SSH. The tablet needs n
 
 `xovi/start` is upstream's own script. It bind-mounts a tmpfs on `/etc/systemd/system/xochitl.service.d`, writes `LD_PRELOAD=/home/root/xovi/xovi.so` and `XOVI_ROOT` there, and restarts xochitl. It is **tethered**: the tmpfs is gone after a reboot, so a reboot is stock.
 
-**The emulator has no systemd.** Its `systemctl` is a stub and a shell loop runs xochitl, so the drop-in never reaches xochitl. On the emulator, `install.sh` also runs `xovi/paper-pure/emu-start`. That script reads the drop-in's `Environment=` lines, parks the supervised xochitl, and starts one with that environment, logging to the container's stdout so `ppemu logs` shows it. `ppemu restart` brings stock back, much like a reboot does on the tablet. An `emu/` change that would remove this special case is proposed in the Status section.
+**Same steps in the emulator.** It runs the image's own systemd, so `xovi/start`'s tmpfs drop-in reaches xochitl as on the tablet, and `ppemu reboot` (or `ppemu stop`/`start`) drops it like a reboot does. No emulator special case.
 
 ## With the update agent (`release/`)
 
@@ -135,7 +135,7 @@ Read from the 3.27.2.2 rootfs, then run under real systemd 255 in the device lan
 | `build.sh`, `build/Dockerfile`, `build/check-abi.sh` | Build, and the ABI proof against the stock rootfs |
 | `install.sh` | SSH installer for the emulator or the tablet |
 | `emu-smoke.sh` | Rung 2 smoke test: side menu, AppLoad, Hello, check it logged and drew (27 s under qemu) |
-| `device/hashtab`, `device/status`, `device/emu-start` | Our glue, shipped as `/home/root/xovi/paper-pure/` |
+| `device/hashtab`, `device/status` | Our glue, shipped as `/home/root/xovi/paper-pure/` |
 | `release/hooks/*`, `release/checks/*` | pp-agent hooks |
 | `host/` | Rung 1: AppLoad's PC emulator, headless (Qt offscreen), with a screenshot extension (`shot.cpp`), a Pure-sized `start.qml`, and `pngdiff.py` |
 
@@ -213,7 +213,7 @@ The rig: xovi-tripletap v1.1.1 `main.sh` unmodified, run by hand (no systemd), w
 - **AppLoad's `qtfb` shims and external apps.** Not built.
 - **A from-scratch reproducibility comparison** of the `.so` files.
 
-### Emulator gaps found (reported, `emu/` not changed)
+### Emulator gaps found (all fixed since in `emu/`: it now runs the image's own systemd; `device/emu-start` is gone)
 
 - **No systemd drop-ins.** `xovi/start` writes `Environment=` into `/etc/systemd/system/xochitl.service.d/` and restarts xochitl. The emulator's supervisor ignores that, and the container can't `mount` (tmpfs), so the files also survive a container restart. Workaround here: `device/emu-start`.
   - A small patch would remove the workaround. It is in this lane's scratch, `work-pp-mods/emu-proposal/`: a `run-unit` wrapper in the entrypoint, `mount`/`umount` wrappers with tmpfs semantics for those dirs, wiping them at boot, and `systemctl show`.

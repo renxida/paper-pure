@@ -161,7 +161,7 @@ inst > "$WORK/5-repair.log" 2>&1
 check "install repairs both" inst --verify > /dev/null 2>&1
 dev 'touch /data/internal/rm_enable_ssh_wifi_marker 2>/dev/null || { mkdir -p /data/internal; touch /data/internal/rm_enable_ssh_wifi_marker; }'
 check "verify catches the SSH-over-Wi-Fi marker" bash -c "! $(printf '%q ' "$REPO/device/install.sh" -p "$PORT" -i "$WORK/id" --verify root@127.0.0.1) > /dev/null 2>&1"
-inst > /dev/null 2>&1
+inst > "$WORK/5-repair-marker.log" 2>&1
 check "install removes it" dev '! test -e /data/internal/rm_enable_ssh_wifi_marker'
 
 t "6. pp-agent and pp-proxy: installed, persisted, and pp-agent-boot waits for rm-sanity"
@@ -208,7 +208,7 @@ check "no freeze block in /etc/hosts" dev '! grep -q "paper-pure freeze" /etc/ho
 check "stock /etc/hosts lines still there" dev 'grep -q "^127.0.0.1.*localhost" /etc/hosts'
 check "pp-agent-boot no longer enabled" dev '! test -e /etc/systemd/system/multi-user.target.wants/pp-agent-boot.service'
 check "pp-agent-tripletap no longer enabled" dev '! test -e /etc/systemd/system/multi-user.target.wants/pp-agent-tripletap.service'
-inst > /dev/null 2>&1
+inst > "$WORK/7-reinstall.log" 2>&1
 check "and install brings it all back" inst --verify > /dev/null 2>&1
 
 t "9. kill switch and crash loops: real pp-agent, real mods hooks, systemd 255"

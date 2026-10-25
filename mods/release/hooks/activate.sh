@@ -16,5 +16,4 @@ xovi/paper-pure/hashtab --timeout 100
 # crashes after our restart count, and pp-agent's check sees them first.
 systemctl reset-failed xochitl.service
 xovi/start
-if [ -d /opt/rmemu ] && [ -x xovi/paper-pure/emu-start ]; then xovi/paper-pure/emu-start; fi   # old emulator: no systemd
 echo "activate: $PP_RELEASE_ID live ($PP_REASON)"

@@ -60,7 +60,6 @@ xovi/paper-pure/hashtab
 
 if [ "$START" = 1 ]; then
     xovi/start
-    if [ -d /opt/rmemu ]; then xovi/paper-pure/emu-start; fi
     for _ in $(seq 1 120); do
         pid=$(pidof xochitl || true)
         if [ -n "$pid" ] && grep -q "$(readlink -f xovi)/xovi.so" "/proc/${pid%% *}/maps" 2>/dev/null; then break; fi

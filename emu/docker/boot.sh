@@ -24,22 +24,23 @@ F=/opt/rmemu
 # /dev paths to its fake tree. Not for this script: nothing to redirect.
 export RMEMU_FAKEROOT=/run/rmemu/none
 
-mount -t tmpfs -o mode=0755,nodev,nosuid,strictatime tmpfs /run
-mkdir -p /run/systemd/system /run/rmemu
-
-# Docker bind-mounts its own hosts, hostname and resolv.conf over /etc and
-# leaves empty placeholders in the container layer. The tablet has the stock
-# files there; put them back once (later edits in the real root fs persist).
-# Docker's DNS servers go to resolved, as DHCP would on the tablet's Wi-Fi.
+# Docker bind-mounts its own hosts, hostname and resolv.conf over /etc (the
+# last one, after the first boot, at the end of the stock resolv.conf
+# symlink) and leaves empty placeholders in the container layer. The tablet
+# has the stock files there; put them back once (later edits in the real root
+# fs persist). Docker's DNS servers go to resolved, as DHCP would on Wi-Fi.
 dns=$(sed -n 's/^nameserver //p' /etc/resolv.conf | tr '\n' ' ')
 mount -o remount,rw /
-for f in hosts hostname resolv.conf; do umount "/etc/$f" 2>/dev/null || true; done
+for f in /etc/hosts /etc/hostname /etc/resolv.conf /run/systemd/resolve/resolv.conf; do umount "$f" 2>/dev/null || true; done
 for f in hosts hostname; do [ -s "/etc/$f" ] || cat "$F/stock/$f" > "/etc/$f"; done
 [ -L /etc/resolv.conf ] || { rm -f /etc/resolv.conf; ln -s resolv-conf.systemd /etc/resolv.conf; }
 # soc0/serial_number is the tablet's machine-id (/etc/machine-id links to it).
 mkdir -p $F/state
 [ -s $F/state/serial_number ] || dd if=/dev/urandom bs=16 count=1 2>/dev/null | md5sum | cut -c1-32 > $F/state/serial_number
 mount -o remount,ro /
+
+mount -t tmpfs -o mode=0755,nodev,nosuid,strictatime tmpfs /run
+mkdir -p /run/systemd/system /run/rmemu
 
 # Fake hardware: a writable copy (rmemud flips battery and charger files),
 # seen at the shim's path and at the tablet's paths. /sys is read-only here,
@@ -104,7 +105,7 @@ if tr '\0' ' ' < /proc/1/cmdline | grep -q qemu; then
 fi
 # Unit credentials need a mount this container can't make ("Failed to set up
 # credentials: Invalid argument"); none are passed on the tablet either.
-for f in $(grep -lE '^(Import|Load)Credential=' /usr/lib/systemd/system/*.service); do
+grep -lE '^(Import|Load)Credential=' /usr/lib/systemd/system/*.service | while read -r f; do
     d=/run/systemd/system/${f##*/}.d
     mkdir -p "$d" && printf '[Service]\nImportCredential=\nLoadCredential=\n' > "$d/rmemu-credentials.conf"
 done
