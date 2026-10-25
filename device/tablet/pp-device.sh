@@ -318,8 +318,15 @@ cmd_install() {
     echo "pp-device install ($(os_version), $(date -u +%FT%TZ))"
     preflight install
     step_files
-    real_open rw
     local u
+    # Stop before masking: a daemon-reload that lands on a pending restart of
+    # a now-masked unit (memfaultd crash-looping) aborted systemd 255's PID 1
+    # in the test bed, and on the tablet PID 1 dying means a reboot.
+    if have_systemd; then
+        for u in $UPDATE_UNITS $SSH_UNITS; do systemctl stop "$u" 2>/dev/null || true; done
+        for u in $UPDATE_UNITS $SSH_UNITS; do systemctl reset-failed "$u" 2>/dev/null || true; done
+    fi
+    real_open rw
     for u in $UPDATE_UNITS $SSH_UNITS; do set_link "$SYSD/$u" /dev/null; done
     set_hosts_block "paper-pure freeze" "$HERE/freeze.hosts"
     step_agent
@@ -328,7 +335,6 @@ cmd_install() {
     if [ -e "$WIFI_SSH_MARKER" ]; then rm -f "$WIFI_SSH_MARKER"; chg "removed $WIFI_SSH_MARKER (SSH over Wi-Fi off)"; fi
     if have_systemd; then
         systemctl daemon-reload
-        for u in $UPDATE_UNITS $SSH_UNITS; do systemctl stop "$u" 2>/dev/null || true; done
         [ -f "$SYSD/pp-agent.timer" ] && systemctl start pp-agent.timer
         [ -f "$SYSD/pp-agent-tripletap.service" ] && systemctl start pp-agent-tripletap.service
         [ -f "$SYSD/pp-proxy.service" ] && { systemctl is-active -q pp-proxy.service || systemctl start pp-proxy.service; }
