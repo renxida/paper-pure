@@ -1,0 +1,18 @@
+# pp-server, production shape: one container, no published ports.
+# The only way in is the Cloudflare Tunnel that cloudflared (inside the
+# container) dials out to. Secrets come from secrets.env, which is never
+# committed (names in README.md). On the managed host the same image runs
+# from render.yaml instead; this file is for any plain Docker host.
+name: pp-server
+services:
+  app:
+    build: .
+    image: pp-server:local
+    restart: unless-stopped
+    env_file:
+      - path: secrets.env
+        required: false
+    volumes:
+      - data:/data
+volumes:
+  data:

@@ -1,0 +1,18 @@
+# Local proof only (test/local-proof.sh): publish ppd on 127.0.0.1:3080, no
+# tunnel, backups to a local restic repo in a second volume. Values come
+# from the environment; the test script makes throwaway ones.
+services:
+  app:
+    ports:
+      - "127.0.0.1:3080:3080"
+    environment:
+      JWT_SECRET_KEY: ${PP_TEST_JWT:?}
+      PP_PUBLISH_TOKEN: ${PP_TEST_PUBLISH:?}
+      RM_HTTPS_COOKIE: "false"
+      RESTIC_REPOSITORY: /backup/repo
+      RESTIC_PASSWORD: ${PP_TEST_RESTIC:?}
+      TUNNEL_TOKEN: ""
+    volumes:
+      - backup:/backup
+volumes:
+  backup:

@@ -38,10 +38,10 @@ FROM restic/restic:0.19.1@sha256:136600b6ff6843d61d355f7f71f460a166429f35de6fd11
 FROM cloudflare/cloudflared:2026.10.0@sha256:9b49eed8f62806d5d45ddf59ecefb5710429598ea6d3fcccd2af938f621b2b07 AS cloudflared
 
 FROM debian:trixie-20261020-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
-RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates tini \
- && rm -rf /var/lib/apt/lists/* \
- && useradd --system --uid 10001 --home-dir /data --no-create-home --shell /usr/sbin/nologin pp
+# No apt: the CA bundle comes from the build stage, setpriv (util-linux) and
+# bash are already in the base. The entrypoint is PID 1 and handles TERM.
+RUN useradd --system --uid 10001 --home-dir /data --no-create-home --shell /usr/sbin/nologin pp
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build /out/rmfakecloud /out/ppd /usr/local/bin/
 COPY --from=restic /usr/bin/restic /usr/local/bin/restic
 COPY --from=cloudflared /usr/local/bin/cloudflared /usr/local/bin/cloudflared
@@ -52,4 +52,4 @@ ENV PP_DATA=/data \
 VOLUME /data
 # No EXPOSE: in production nothing listens outside the container.
 # ppd listens on :3080 inside it; cloudflared dials out to Cloudflare.
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

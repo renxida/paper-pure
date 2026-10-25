@@ -1,0 +1,18 @@
+# Stock sync (xochitl, rm-sync) -> /etc/hosts -> 127.0.0.1:443 -> this proxy
+# -> our server through Cloudflare Access. Sync is not a mod: this runs in
+# stock mode too, and the mods kill switch (paper-pure/disable) leaves it on.
+[Unit]
+Description=paper-pure sync proxy (reMarkable cloud names -> our server)
+RequiresMountsFor=/home/root/paper-pure
+After=network.target
+Before=xochitl.service
+ConditionPathExists=/home/root/paper-pure/bin/pp-proxy
+ConditionPathExists=/home/root/paper-pure/proxy/cert.pem
+
+[Service]
+ExecStart=/home/root/paper-pure/bin/pp-proxy run
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

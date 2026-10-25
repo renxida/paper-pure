@@ -31,6 +31,11 @@ case "${RESTIC_REPOSITORY:-}" in   # a local repo (the restore drill) must be ou
 esac
 as_pp() { setpriv --reuid=pp --regid=pp --init-groups --inh-caps=-all "$@"; }
 
+if ! as_pp rmfakecloud listusers 2>/dev/null | grep -q .; then
+    # rmfakecloud makes the first web login an admin, and a user created with
+    # the CLI while it runs isn't seen until restart (first login then fails).
+    echo "entrypoint: NO USERS. Run: rmfakecloud-cli setuser -u EMAIL -a -s   then restart the container"
+fi
 as_pp rmfakecloud &
 as_pp ppd -addr :3080 -data "$D/pp" -upstream http://127.0.0.1:3000 &
 
