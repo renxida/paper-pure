@@ -1,0 +1,20 @@
+# Patches arrive as pull requests, and CI gates them like any change. The
+# server image is pinned by digest (server/Dockerfile), so this is how its
+# Debian, Python, Go toolchain, restic and cloudflared get security fixes.
+# Render patches its hosts, not our image (server/hosting.md).
+# Not covered: rmfakecloud's commit (RMFAKECLOUD_COMMIT) and mods/versions.lock,
+# which are bumped by hand with a full emulator run.
+version: 2
+updates:
+  - package-ecosystem: docker
+    directory: /server
+    schedule:
+      interval: weekly
+  - package-ecosystem: pip
+    directory: /server/wishes
+    schedule:
+      interval: monthly
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

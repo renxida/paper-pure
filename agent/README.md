@@ -10,13 +10,15 @@ The tablet pulls; nothing pushes into it. A systemd timer runs `pp-agent update`
 
 1. **Gates.** Skip unless `wlan0` is up and holds the default route, and the battery is at or above the floor (30%) or charging.
 2. **Fetch and verify.** GET `latest.json` and `latest.json.sig` from the feed. Check the ed25519 signature against Cedar's public key. Nothing else is trusted, so a compromised server can't push code. Redirects are never followed: a 3xx is an error (see "What the server lane serves").
-3. **Refuse what doesn't fit.** Wrong device, an OS version the release wasn't tested on (exact match on `IMG_VERSION`, 3.27.2.2), not newer than the running release (stops replays), or a release that failed here before.
+3. **Refuse what doesn't fit.** Wrong device, an OS version the release wasn't tested on (exact match on `IMG_VERSION`, 3.27.2.2), not newer than every release ever committed here (stops replays, even after a rollback), or a release that failed here before. Nothing at all while a triple-press has mods off.
 4. **Download.** GET `<id>.tar.gz` into `downloads/`. An interrupted download resumes next run with a Range request. A sha256 mismatch deletes the file.
 5. **Unpack** into `releases/.staging-<id>`, then rename to `releases/<id>`. Nothing in the tarball can write outside it.
 6. **Swap.** Write `pending=<id>` to state, run the old release's `deactivate.sh`, then flip `current` with one `rename(2)` of a temp symlink.
 7. **Health check.** Run the new release's `activate.sh`, then the built-in checks (xochitl stays active with the same PID for 70 s, longer than its 60 s watchdog; optional "these libraries are loaded in xochitl"), then the release's `checks/*`.
 8. **Commit or roll back.** Pass: the release is committed, the previous one stays on disk, older ones are pruned. Fail: deactivate the new release, flip `current` back, re-activate the old release, and mark the new one failed so it is never tried again. Stopped mid-check (SIGTERM: a shutdown, or a triple-press): no hooks run, `pending` stays, and the next run rolls back.
-9. **Report.** POST a status JSON to the server.
+9. **Recheck and report.** With nothing to install and mods live, run the live release's `checks/*` again (not the 70 s window) and keep the result: a failure is reported, nothing else. Then POST a status JSON to the server.
+
+Leftovers of a run that died mid-check are rolled back first, without turning anything on: only an install, a triple-press, or boot (with `activate_on_boot`) turns mods on, and each checks the OS first.
 
 `pp-agent boot` runs once per boot:
 
@@ -33,7 +35,7 @@ The desiderata: "Triple-press power disables all mods. Reboot returns stock UI."
 
 | Way | What happens | Mods come back |
 | --- | --- | --- |
-| **Triple-press power** | Mods on (pp-agent turned them on, or xochitl runs with `LD_PRELOAD`, e.g. xovi started by hand): `deactivate.sh`, stock UI. Mods off: turn the committed release on, health-checked; unhealthy means `deactivate.sh` again. Pressed while pp-agent is busy (installing, booting): it stops that run (SIGTERM) and turns mods off; a stopped install is rolled back and not retried | Next triple-press, or next install |
+| **Triple-press power** | Mods on (pp-agent turned them on, or xochitl runs with `LD_PRELOAD`, e.g. xovi started by hand; with no release installed, xovi's own `stock` script runs): `deactivate.sh`, stock UI. Mods off: turn the committed release on, health-checked; unhealthy means `deactivate.sh` again. Pressed while pp-agent is busy (installing, booting): it stops that run (SIGTERM) and turns mods off; a stopped install is rolled back and not retried. **Off sticks** (`mods_off` in state): no install and no boot turns mods on until the next triple-press | Next triple-press only |
 | **Reboot** | xovi's drop-in lives on a tmpfs, and pp-agent boot does not activate (`activate_on_boot: false`) | Triple-press, or next install |
 | **Auto-rollback** | A release that fails its health check is rolled back at install, or at the next boot if the check was cut short | A newer release |
 
@@ -53,7 +55,8 @@ What keeps that safe:
 - **Slow crash loops** (a hook that dies a few seconds in): the health check polls once a second and rolls back at the first new PID, which leaves 3 more crashes before the limit. Test bed, a crash every 5 s: rolled back after 2 crashes, no reboot, `rm-emergency` never ran.
 - **Instant ones** (a library that won't load): the OS reboots mid-check. The agent gets SIGTERM, leaves `pending` set and runs no hooks. The reboot drops xovi's tmpfs drop-in, so xochitl comes up stock, and `pp-agent boot` rolls `pending` back and marks the release failed. Test bed: rebooted 5 s into the check, rolled back at the next boot, boot counter 1.
 - **Never an A/B swap.** OS updates never run here (device lane), and `rm-sanity` writes `swu_applied=0` 60 s after every boot.
-- **Never the bootloader's error count.** The SPL counts boots per slot and falls back to the other slot (an unfrozen OS) past a limit; `rm-sanity` clears the count 60 s after boot. Nothing of ours turns mods on before that: `pp-agent-boot` and `pp-agent-tripletap` wait for rm-sanity (device lane drop-in), the update timer starts at 3 minutes. So every crash reboot happens with the count at 0, and the next boot counts 1.
+- **Never the bootloader's error count.** The SPL counts boots per slot and falls back to the other slot (an unfrozen OS) past a limit; `rm-sanity` clears the count 60 s after boot. Nothing of ours turns mods on before that: `pp-agent-boot`, `pp-agent-tripletap` and `pp-agent` (the update) wait for rm-sanity (device lane drop-in). So every crash reboot happens with the count at 0, and the next boot counts 1.
+- **Never before xochitl.** With a passcode set, `/home` (where all of this lives) unlocks only once the passcode is typed into xochitl. Our units order after xochitl, never before it (`docs/firmware.md`).
 - **A hang, not a crash:** the watchdog kills xochitl at 60 s, and the 70 s stability window sees it.
 - **At boot** (`activate_on_boot: true` only): the guard ends a crash-reboot loop after 3 boots.
 
@@ -139,7 +142,7 @@ checks/NN-name.sh     smoke checks, run in name order after activate
 ```
 
 - All three are optional. A missing hook is a no-op.
-- They run as root. The working directory is the release dir. The env has `PP_ROOT`, `PP_RELEASE_ID`, `PP_RELEASE_DIR`, `PP_REASON` and `PP_OS_VERSION`. `PP_REASON` is one of `install`, `boot`, `rollback`, `manual-rollback`, `boot-failed`, `tripletap`, `tripletap-failed`.
+- They run as root. The working directory is the release dir. The env has `PP_ROOT`, `PP_RELEASE_ID`, `PP_RELEASE_DIR`, `PP_REASON` and `PP_OS_VERSION`. `PP_REASON` is one of `install`, `boot`, `rollback`, `manual-rollback`, `boot-failed`, `tripletap`, `tripletap-failed`, and for checks only `recheck` (every update run while mods are live; checks must be read-only and quick).
 - Exit 0 means pass. Anything else means fail: on install the agent rolls back, at boot or on a triple-press it runs `deactivate.sh` and stays stock. Output goes to `agent.log`.
 - Timeouts: hooks get 120 s and checks 60 s, then the whole process group is killed. That counts as a failure.
 - The agent's units are a oneshot (timer, boot) and a simple service (tripletap). systemd kills anything a hook leaves running, so long-lived things go through `systemctl` or `systemd-run`.
@@ -172,6 +175,7 @@ Every field has a default for the Pure on 3.27.2.2. A config file only overrides
 | `activate_on_boot` | false | The spec: reboot returns stock UI. `true` brings mods back at every boot |
 | `power_key_device` | found by name, then by `KEY_POWER` capability under `sys_class_input` | tatsu: the i.MX93 BBNSM key, `44440000.bbnsm:pwrkey` (the name in `/etc/pm/sleep.wakesrc`) |
 | `tripletap_gap_ms` | 3000 | Longest gap between the three presses. Uses the kernel's event times |
+| `hand_stock` | `/home/root/xovi/stock` | What a triple-press runs when mods were started by hand and no release is installed |
 | `run_dir` | `/run/paper-pure` | Holds `live`; must be a tmpfs |
 | `systemctl`, `xochitl_unit`, `os_release`, `sys_class_net`, `sys_class_input`, `proc_net_route`, `proc_dir` | the real paths | Overridable for the emulator and tests |
 
@@ -195,7 +199,7 @@ Flight mode should fail the Wi-Fi gate. `wpa_supplicant.service` has an `ExecCon
 ## What the server lane serves
 
 - A static directory per device, `feed_url`: `latest.json`, `latest.json.sig`, `<id>.tar.gz`. It must support Range requests (any static file server does) so downloads can resume.
-- `POST status_url` with `Content-Type: application/json`, any 2xx. Body: `device`, `agent_version`, `time`, `os_version`, `release` (what `current` points at), `live` (release with mods on now, `""` = stock UI), `disabled`, `committed`, `previous`, `pending`, `failed[]`, `unhealthy_boots`, `guard_tripped`, `last_run`, `last_result`, `last_error`, `battery_percent`, `events[]` (the last 30), and `log_tail` (the last 4 KiB of `agent.log`). Keep the last N per device somewhere Claude can read.
+- `POST status_url` with `Content-Type: application/json`, any 2xx. Body: `device`, `agent_version`, `time`, `os_version`, `release` (what `current` points at), `live` (release with mods on now, `""` = stock UI), `disabled`, `committed`, `previous`, `pending`, `failed[]`, `unhealthy_boots`, `guard_tripped`, `last_run`, `last_result`, `last_error`, `battery_percent`, `mods_off`, `checks` (the last run of a release's checks: time, release, reason, ok, error), `sync` (pp-proxy's `/run/paper-pure/sync.json`: last good sync, error count, last error), `events[]` (the last 30), and `log_tail` (the last 4 KiB of `agent.log`). Keep the last N per device somewhere Claude can read.
 - Both go through Cloudflare Access with the tablet's service token, carried in `headers`.
 - **The agent never follows redirects.** Behind Access, a refused token gets a 302 to a login page. Followed, a status POST would turn into a GET of that page and look like success. So any 3xx is an error that names its `Location`. Access's "return 401 for service auth" setting is still worth turning on, so the error says 401.
 
@@ -210,6 +214,19 @@ device/test/run.sh <extracted-rootfs>      # the agent under real systemd 255, w
 ```
 
 ## Status
+
+### Review fixes (Oct 25, 2026, evening)
+
+`make test` passes (`go vet`, `go test -race`). New tests in `internal/agent/harden_test.go` and `internal/release/release_test.go`, each also checked by breaking the code it guards (the test then fails):
+
+- **OS pin on every path that turns mods on.** An update run that finds a run interrupted mid-check rolls it back and turns nothing on, on the same OS or after a slot fallback to 3.29.0.153 with Wi-Fi down (hooks: only `bad deactivate rollback`). A failed install of a release tested on both OSes does not turn on the old release, which knows only the old one. `pp-agent rollback` refuses when the previous release wasn't tested on the running OS.
+- **Anti-replay that survives rollbacks.** `newest_created` in state: after a manual rollback to r1, a release older than r2 is refused; with the running release's manifest gone it still is; with neither, it refuses instead of guessing.
+- **Triple-press off sticks.** Off, then a new release: not installed, and boot (even with `activate_on_boot`) stays stock, until a triple-press turns mods on; then it installs. A manual rollback (it turns mods on) clears it.
+- **Mods started by hand, no release:** a triple-press runs `hand_stock`.
+- **Rechecks:** each update run while live re-runs the checks; a failing one shows in `status.checks` and changes nothing; none while mods are off.
+- **Sync health:** `status.sync` carries pp-proxy's `sync.json` as is; a broken file is left out.
+- **Chained symlinks:** `d/up -> ..` plus `escape -> d/up/..` (each fine alone) is refused by `Pack` and `Extract`; in-tree chains and dangling in-tree links still pack.
+- In rung 2 (`test/e2e`), the installed release's checks show in the status report (`install true`, then `recheck true`).
 
 Verified (Oct 25, 2026, in the dev container):
 
@@ -252,7 +269,6 @@ Not verified:
 - Anything on the real tablet: real sysfs values, real `systemctl show xochitl.service` output, Wi-Fi and sleep behavior, timer behavior across suspend.
 - **Triple-press on hardware.** That the BBNSM key's input name contains `pwrkey` (the name match; the `KEY_POWER` capability fallback covers it if not); that xochitl does not grab the key (xovi-tripletap reads it with `evtest`, which suggests not); that the press that wakes the tablet is reported to userspace (the first press sends it to sleep, the second wakes it); and that 3 s between presses is enough with a sleep and a wake in between. Try it by hand first: `journalctl -fu pp-agent-tripletap` and press.
 - HTTPS through Cloudflare (the code path is the same as `ca_file` pinning, which is tested).
-- The emulator rung for the triple-press: the emulator's input devices exist only through its `LD_PRELOAD` shim, and `pp-agent` is static, so it can't open them there. `cat /dev/input/event0 | pp-agent -config ... tripletap` with `power_key_device: /dev/stdin` would work (busybox `cat` gets the shim), not tried.
 
 Open questions for Cedar:
 

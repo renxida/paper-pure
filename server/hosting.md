@@ -13,7 +13,7 @@ Nothing here was signed up for or deployed. Prices and features are from the pro
 | Secrets | Env vars and secret files in the dashboard | `fly secrets set` | Variables | Ours |
 | Logs | Dashboard, log streams, API | `fly logs` (recent only), log shipping | Dashboard | Ours |
 | Shell for a restore | Yes (paid plans) | `fly ssh console` | Yes | Yes |
-| Who patches the OS | Render | Fly | Railway | **Cedar** |
+| Who patches the OS | Render patches its hosts; our image is ours (below) | Same | Same | **Cedar** |
 | Catch | A service with a disk is one instance; deploys have a short outage | Volume tied to one host: if that host dies, you restore from a snapshot or from restic. You run Machines with a CLI | Usage-based bill; newest of the three | Breaks "Cedar never maintains a bare server" |
 
 ## Recommendation: Render, background worker with a 5 GB disk
@@ -26,6 +26,8 @@ Nothing here was signed up for or deployed. Prices and features are from the pro
 Runner-up: **Fly.io.** Cheaper, and fine, but the volume lives on one physical host and you operate Machines with `flyctl`. Pick it if cost matters more than comfort; the same image runs unchanged (it needs a `fly.toml` with a `[mounts]` section and no `[services]`).
 
 Not Railway: usage billing and less of a track record, with no gain for us. Not a VPS: someone has to patch it, and that someone would be Cedar.
+
+**Who patches what.** With a Docker image, the host patches only its own machines. Everything inside the image is pinned by digest and stays as built until someone bumps it: Debian and Python in the base, the Go toolchain that builds ppd and rmfakecloud, restic, and cloudflared (Cloudflare supports cloudflared releases for about a year). `.github/dependabot.yml` opens a PR for new digests every week; CI gates it, merging it redeploys. rmfakecloud's commit and the Python wheels' hashes are bumped by hand (README, "Upgrade rmfakecloud or a base image"). Nobody maintains a bare server, but somebody merges those PRs: Claude, with Cedar's merge rules.
 
 ## Backups go to a second provider: Backblaze B2
 

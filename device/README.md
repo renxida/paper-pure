@@ -16,7 +16,7 @@ device/test/run.sh <extracted 3.27.2.2 rootfs>                  # the proof, in 
 | `install.sh` | Runs on the laptop. One SSH connection (a password is asked at most once), tar over SSH (no scp needed), then `pp-device.sh` on the tablet |
 | `tablet/pp-device.sh` | Runs on the tablet: `install`, `verify`, `uninstall`, and `persist PATH` / `restore PATH` for other lanes |
 | `tablet/freeze.hosts` | The `/etc/hosts` block that sends update hosts to `0.0.0.0` |
-| `tablet/wait-sanity.sh`, `tablet/wait-sanity.conf` | Mods wait for `rm-sanity` at boot: the drop-in goes on `pp-agent-boot` and `pp-agent-tripletap` (see "Never brick") |
+| `tablet/wait-sanity.sh`, `tablet/wait-sanity.conf` | Mods wait for `rm-sanity` at boot: the drop-in goes on `pp-agent-boot`, `pp-agent-tripletap` and `pp-agent` (see "Never brick") |
 | `test/run.sh`, `test/testbed/` | The stand-in tablet and the scenarios |
 
 On the tablet, everything of ours is under `/home/root/paper-pure/device/`: the scripts, `managed.list` (every root fs path we changed) and `stock/` (the stock copy of each, taken before the first change).
@@ -37,7 +37,7 @@ Everything on 3.27.2.2 that can update the OS, found in the root fs:
 
 Hosts in `tablet/freeze.hosts` (`0.0.0.0`): `device.cloud.remarkable.com` (memfaultd, so suricatta), `device.memfault.com` (memfaultd's built-in default), `enterprise.cloud.remarkable.com` (MDM), and `remarkable-software.s3.us-east-2.amazonaws.com` (where the `.swu` files live; not on the tablet, blocked in case an update server hands out its URLs). The tablet resolves names through systemd-resolved, which reads `/etc/hosts` (`ReadEtcHosts` is not turned off in `resolved.conf.d`). There is no `iptables` binary on the tablet (the netfilter modules are there), so no firewall layer.
 
-Other reMarkable names in the binaries (`auth.remarkable.com`, `errors.cloud.remarkable.com`, `retail.cloud.remarkable.com`, `tectonic.remarkable.com`, `www.remarkable.com`) are sync or analytics, not updates. They belong to the server lane's `pp-proxy` list or a later "nothing goes to reMarkable" pass.
+reMarkable's cloud is unused (desiderata row 5): sync goes through `pp-proxy` (its 13 names point at `127.0.0.1`), and the other reMarkable names in `xochitl`, `rm-sync` and `user-authenticator-cli` go to `0.0.0.0` too, in the same block: `auth.remarkable.com` (accounts), `errors.cloud.remarkable.com`, `retail.cloud.remarkable.com` (the store) and `www.remarkable.com`. Their dev, qa and stage twins are not blocked; public builds (`BUILD_MODE_RM="public"`) don't use them.
 
 Not used: an `AutoUpdate` key exists in xochitl's settings code, but the Updates switch does not write it (checked in the emulator), so we don't touch `xochitl.conf`.
 
@@ -52,8 +52,9 @@ Not used: an `AutoUpdate` key exists in xochitl's settings code, but the Updates
 
 ## Never brick
 
-- **Mods wait for rm-sanity.** The boot ROM counts boot attempts per slot and switches slot past a limit (SPL strings: `ABINFO: A (ecnt = %u)`, `A in error state, switch to B`, and with both slots bad, recovery mode, which needs a cable). `rm-sanity.service` clears the count 60 s after boot. If a mod crashes xochitl before that, the stock units (`StartLimitBurst=4`, `OnFailure=emergency.target`, `rm-emergency.sh` reboots) loop the tablet, and the count climbs to a slot switch onto an unfrozen OS. So the two units that can turn mods on, `pp-agent-boot.service` and `pp-agent-tripletap.service`, get a drop-in: `ExecStartPre=wait-sanity.sh` waits until `rm-sanity` has run this boot and `root<slot>_errcnt` is 0, up to 5 minutes, else that unit fails (the triple-press service retries). The update timer starts at 3 minutes. A mod crash loop then costs at most one reboot per try with the count at 1, and the agent rolls the release back (`agent/README.md`, "Why a crash loop can't brick it").
+- **Mods wait for rm-sanity.** The boot ROM counts boot attempts per slot and switches slot past a limit (SPL strings: `ABINFO: A (ecnt = %u)`, `A in error state, switch to B`, and with both slots bad, recovery mode, which needs a cable). `rm-sanity.service` clears the count 60 s after boot. If a mod crashes xochitl before that, the stock units (`StartLimitBurst=4`, `OnFailure=emergency.target`, `rm-emergency.sh` reboots) loop the tablet, and the count climbs to a slot switch onto an unfrozen OS. So the three units that can turn mods on, `pp-agent-boot.service`, `pp-agent-tripletap.service` and `pp-agent.service` (an install), get a drop-in: `ExecStartPre=wait-sanity.sh` waits until `rm-sanity` has run this boot and `root<slot>_errcnt` is 0, up to 5 minutes, else that unit fails (the triple-press service retries, the timer tries again in 30 minutes). A mod crash loop then costs at most one reboot per try with the count at 1, and the agent rolls the release back (`agent/README.md`, "Why a crash loop can't brick it").
 - The wait has a cost: `pp-agent-boot` is a oneshot wanted by `multi-user.target`, so `multi-user.target` is reached about 60 s after boot instead of about 20 s. Nothing of reMarkable's is ordered after it (only stock `graphical.target` and `systemd-boot-check-no-failures`, neither used). xochitl starts as before.
+- **Nothing of ours before xochitl.** With a passcode set, `/home` unlocks only once the passcode is typed into xochitl, and every unit of ours lives on `/home`. A unit ordered `Before=xochitl` (pp-proxy had one) makes xochitl wait for `/home`; its 60 s `JobTimeoutSec` runs out, `OnFailure=emergency.target` reboots, every boot, and no UI ever appears to type the passcode into. Only the recovery tool gets out. `verify` fails if any `pp-*` unit is in xochitl's ordering (`systemctl list-dependencies --after`), and the test bed boots with a passcode stand-in (scenario 10). See `docs/firmware.md`.
 - **Kill switches, no cable needed.** Triple-press power toggles mods (`pp-agent-tripletap.service`, persisted here like the other agent units). Reboot is stock (`activate_on_boot` is false by default). A failing release rolls back by itself. Over SSH: `touch /home/root/paper-pure/disable`, and nothing turns mods on.
 - **Undo.** `--uninstall` restores every path in `managed.list` from `stock/`.
 
@@ -71,9 +72,9 @@ Nothing here touches xochitl, its unit, the pen or display stack. We stop update
 
 ## For other lanes
 
-- `pp-device.sh persist PATH...` copies PATH as it is live into the real root fs (backing up stock first). `pp-device.sh restore PATH...` puts it back. Use these instead of `umount -R /etc`.
+- `pp-device.sh persist PATH...` copies PATH as it is live into the real root fs (backing up stock first). `pp-device.sh restore PATH...` puts it back, and refuses a path it never persisted (it has no stock copy of it, and deleting it could delete a stock file). Use these instead of `umount -R /etc`.
 - **agent**: `agent/install.sh` uses only `cp`, `chmod` and `mv` (the tablet has no `install(1)`), and `install.sh --agent` copies every unit in `agent/systemd/`. `pp-device.sh` persists the four units, their wants links and the rm-sanity drop-ins (`AGENT_UNITS`, `WAIT_UNITS`).
-- **server**: `device/install.sh --proxy` runs `tablet-proxy/install.sh --runtime`, then persists the unit, its `multi-user.target.wants` link, the `# pp-proxy` hosts block (from `pp-proxy hosts`) and the CA bundle with `pp-device.sh`. Its own persistent mode (`umount -R /etc`) is not used.
+- **server**: `device/install.sh --proxy` runs `tablet-proxy/install.sh --runtime`, then persists the unit, its `multi-user.target.wants` link, the `# pp-proxy` hosts block (from `pp-proxy hosts`) and the CA bundle with `pp-device.sh`. `tablet-proxy/install.sh` has no persistent mode any more.
 - **mods**: the triple-press is `pp-agent tripletap`, not xovi-tripletap (whose `enable.sh` does `umount -R /etc`).
 
 ## Status

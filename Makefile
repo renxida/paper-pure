@@ -28,6 +28,13 @@ ACTIONLINT := github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
 ifeq ($(origin RELEASE_ID),undefined)
 RELEASE_ID := $(shell date -u +%Y%m%d-%H%M%S)-$(shell git rev-parse --short=7 HEAD 2>/dev/null || echo nogit)$(shell git diff --quiet HEAD 2>/dev/null || echo -dirty)
 endif
+# A release's "created" is its commit's time, not the time it was packed: the
+# tablet installs only releases newer than any it had, so a re-run of an old
+# CI job, or a slow one finishing last, can't ship old code as new. A dirty
+# tree is a dev build: now. INPUTS names what the release is built from (the
+# mods/ and apps/ trees); publish skips a release whose inputs are live.
+CREATED := $(shell git diff --quiet HEAD 2>/dev/null && git log -1 --format=%cI HEAD 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)
+INPUTS  := $(shell [ -z "$$(git status --porcelain -- mods apps 2>/dev/null)" ] && git rev-parse HEAD:mods HEAD:apps 2>/dev/null | sha256sum | cut -c1-16 || echo dirty)
 
 # Time limits, so a hang fails one step instead of eating the CI job. Proofs
 # and rung2 run arm64 code: natively on arm64 (CI), about 4x slower under
@@ -173,8 +180,8 @@ pack:
 	if [ -z "$$key" ]; then echo "pack: no PP_SIGNING_KEY, using a throwaway key"; \
 	  agent/out/ppsign keygen -out "$$tmp/k" > /dev/null; key=$$tmp/k/release.key.pem; feed=$$tmp/feed; fi; \
 	openssl pkey -in "$$key" -pubout -out "$$tmp/pub.pem"; \
-	agent/out/ppsign pack -key "$$key" -dir mods/out/release -id "$$id" -os $(PP_OS) \
-	  -expect-mapped xovi.so -expect-mapped appload.so -notes "commit $$(git rev-parse HEAD)" -out "$$feed" -latest; \
+	agent/out/ppsign pack -key "$$key" -dir mods/out/release -id "$$id" -os $(PP_OS) -created "$(CREATED)" \
+	  -expect-mapped xovi.so -expect-mapped appload.so -notes "commit $$(git rev-parse HEAD) inputs $(INPUTS)" -out "$$feed" -latest; \
 	agent/out/ppsign verify -pub "$$tmp/pub.pem" -manifest "$$feed/latest.json"; \
 	echo "$$id" > "$$feed/release-id"
 
@@ -188,8 +195,15 @@ publish:
 	dev=$${url#*/pp/releases/}; \
 	export PP_SERVER=$${url%%/pp/releases/*} PP_DEVICE=$${dev%%/*} \
 	  CF_ACCESS_CLIENT_ID=$${PP_CF_ACCESS_CLIENT_ID:-} CF_ACCESS_CLIENT_SECRET=$${PP_CF_ACCESS_CLIENT_SECRET:-}; \
-	server/scripts/publish.sh "$$feed" "$$id" --latest; \
 	hdr=(); [ -z "$$CF_ACCESS_CLIENT_ID" ] || hdr=(-H "CF-Access-Client-Id: $$CF_ACCESS_CLIENT_ID" -H "CF-Access-Client-Secret: $$CF_ACCESS_CLIENT_SECRET"); \
+	live=$$(mktemp); trap 'rm -f "$$live"' EXIT; \
+	code=$$(curl -sS -o "$$live" -w '%{http_code}' "$${hdr[@]}" "$${url%/}/latest.json") || code=000; \
+	case $$code in 404) echo "publish: the feed is empty, first release" ;; \
+	200) why=$$(python3 -I server/scripts/publish-check.py "$$live" "$$feed/latest.json") || \
+	  { echo "publish: FAIL (Access login page? see docs/ci.md)" >&2; exit 1; }; \
+	  if [ -n "$$why" ]; then echo "publish: SKIP $$id: $$why"; exit 0; fi ;; \
+	*) echo "publish: FAIL GET $${url%/}/latest.json answered $$code" >&2; exit 1 ;; esac; \
+	server/scripts/publish.sh "$$feed" "$$id" --latest; \
 	curl -fsS "$${hdr[@]}" "$${url%/}/latest.json" | cmp -s - "$$feed/latest.json" || \
 	  { echo "publish: FAIL $${url%/}/latest.json is not what we signed (Access login page? see docs/ci.md)" >&2; exit 1; }; \
 	echo "publish: PASS $$id is live at $${url%/}/latest.json"

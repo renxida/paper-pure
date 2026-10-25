@@ -178,7 +178,7 @@ has "ppd log" "$(compose logs app)" 'status tatsu: os=3.27.2.2 release="proof1"'
 # ---- 6. tablet sync path ----------------------------------------------------
 step "6. stock sync path: pair and read the sync root through pp-proxy -> gate -> ppd -> rmfakecloud"
 "$W/bin/pp-proxy" -dir "$W/proxy" gencert >/dev/null
-"$W/bin/pp-proxy" -config "$T/agent.json" -dir "$W/proxy" -listen "127.0.0.1:$PXPORT" run 2> "$W/pp-proxy.log" &
+"$W/bin/pp-proxy" -config "$T/agent.json" -dir "$W/proxy" -listen "127.0.0.1:$PXPORT" -status "$W/sync.json" run 2> "$W/pp-proxy.log" &
 PIDS+=($!)
 tab() { # name path [curl args]: a request as xochitl/rm-sync makes it, trusting only the tablet CA
     local h=$1 p=$2; shift 2
@@ -199,6 +199,7 @@ DOCID=$(jget 0 ID <<<"$up")
 has "root index lists the uploaded document" "$(tab internal.cloud.remarkable.com "/sync/v3/files/$RH" -H "Authorization: Bearer $USR")" "$DOCID"
 eq "a name outside the cert" "$(curl -s --noproxy "*" -o /dev/null -w "%{http_code}" --resolve "evil.example.org:$PXPORT:127.0.0.1" --cacert "$W/proxy/ca.crt" "https://evil.example.org:$PXPORT/" || true)" 000
 has "pp-proxy log" "$(cat "$W/pp-proxy.log")" "GET internal.cloud.remarkable.com/sync/v3/root -> 200"
+eq "pp-proxy's sync health (for the agent's report): syncs ok, no errors" "$(python3 -I -c 'import json,sys; h=json.load(open(sys.argv[1])); print(h["ok"] > 0, bool(h.get("last_ok")), h["errors"])' "$W/sync.json")" "True True 0"
 if [ -z "${PP_SKIP_TATSU:-}" ]; then
     UPSTREAM="$GATE" CF_ID="$CF_ID" CF_SECRET="$CF_SECRET" PP_WORK="$W" "$S/tablet-proxy/test-tatsu.sh" | sed 's/^/    /'
     ok "pp-proxy on the tatsu userland (above)"
@@ -279,6 +280,7 @@ eq "last backup ok" "$(jget ok <<<"$B")" true
 SNAP=$(jget summary snapshot_id <<<"$B")
 ok "snapshot ${SNAP:0:8}, $(jget summary total_files_processed <<<"$B") files"
 eq "healthz carries the backup" "$(curl -fsS "$BASE/pp/healthz" | jget backup ok)" true
+eq "/pp/problems: nothing needs a human (backup fresh, tablet reported)" "$(curl -s "$BASE/pp/problems" | jget ok)" true
 if docker run --rm -v "${P}_backup:/b:ro" --entrypoint grep pp-server:local -rlqa -e "$USER_EMAIL" -e proof-notes /b; then
     die "plaintext found in the restic repo"
 fi
@@ -293,6 +295,9 @@ compose up -d --no-build 2>&1 | tail -n 1
 wait_healthy
 eq "fresh server has no users" "$(app rmfakecloud-cli listusers 2>&1 | grep -c "$USER_EMAIL" || true)" 0
 eq "fresh server has no status" "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/pp/status/tatsu")" 404
+PB=$(curl -s -w ' HTTP %{http_code}' "$BASE/pp/problems")
+has "/pp/problems on the wiped server" "$PB" "backup: none has run yet"
+has "/pp/problems on the wiped server" "$PB" "HTTP 503"
 
 app restore.sh latest 2>&1 | grep -E '^restore:' | sed 's/^/    | /'
 compose restart -t 10 app >/dev/null 2>&1

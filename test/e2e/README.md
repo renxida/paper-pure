@@ -9,7 +9,7 @@ test/e2e/run.sh --keep          # leave the server, gate and emulator up at the 
 PP_BUILD_CA=/root/.ccr/ca-bundle.crt test/e2e/run.sh   # behind a TLS-intercepting proxy
 ```
 
-It prints one line per step (`PASS`, `FAIL` with the reason and the log, or `SKIP` after a failed setup step) and exits 0 only if every step passed. Logs, screenshots and work files go to `${PP_E2E_OUT:-test/e2e/out}` (gitignored). It starts with `ppemu reset`, so it wipes the emulator's notebooks.
+It prints one line per step (`PASS`, `FAIL` with the reason and the log, or `SKIP` after a failed setup step), a `....` heartbeat with the log's last line every minute while a step runs, and for a failed step its `FAIL` lines and the last 80 lines of its log. It exits 0 only if every step passed. Logs, screenshots and work files go to `${PP_E2E_OUT:-test/e2e/out}` (gitignored). It starts with `ppemu reset`, so it wipes the emulator's notebooks.
 
 Needs: Docker with arm64 (qemu-user binfmt on x86), Node 20+, Go, python3, `ssh`, `curl`, `openssl`, the firmware (`emu/bin/ppemu setup` fetches it). Hello is rebuilt per release id with Qt's `rcc`: the host's if it has one, else the Qt stage of `mods/build/Dockerfile` (cached by `mods/build.sh`), loaded as `pp-e2e-qt`. Ports: `PP_E2E_PORT` (3180) and the next one.
 
@@ -35,13 +35,13 @@ Installed the tablet's way: `device/install.sh --key --agent --release-pub --age
 | `install` | `device/install.sh --agent --proxy` exits 0 with every check PASS; units active; `pp-proxy check` through the gate |
 | `freeze` | `--verify` passes; update units masked; the four update hosts resolve to nothing; update-engine never started; Settings > Software shows Updates off, and switching it on fails (`UnitMasked`); no update host in the journal. Starts a DNS monitor (`resolvectl monitor`) |
 | `sync` | Pair the stock UI (Settings > General > Account > Pair, code from rmfakecloud's web API, typed on the on-screen keyboard); draw in a new notebook; the page's exact bytes land in rmfakecloud; `tools/wishes` renders the server's copy with the strokes where they were drawn; a PDF uploaded on the server appears on the device; pp-proxy saw no 4xx/5xx |
-| `ota` | A release built from `mods/out/release` + `apps/hello` (built with the release id), signed, published to ppd through the gate with `server/scripts/publish.sh`; `pp-agent.service` installs it and Hello shows the id (`mods/emu-smoke.sh`). Then: no `appload.so` → rolled back; signed by another key → refused; tarball changed after signing → refused; built for 3.27.3.0 → refused. Mods stay on throughout |
+| `ota` | Stops `pp-agent.timer` first, so every agent run is the step's own (a timer run once installed the release before the step asked, and the step saw "up to date"). A release built from `mods/out/release` + `apps/hello` (built with the release id), signed, published to ppd through the gate with `server/scripts/publish.sh`; `pp-agent.service` installs it (state and agent log, not just the command's output), its checks pass including `30-appload.sh`, and Hello shows the id (`mods/emu-smoke.sh`); a second run re-checks the live release (`checks.reason` `recheck`). Then: no `appload.so` → rolled back; signed by another key → refused; tarball changed after signing → refused; built for 3.27.3.0 → refused. Mods stay on throughout |
 | `killswitch` | Three power presses (0.6 s apart) turn mods off, three more turn them back on, health-checked |
 | `reboot` | `ppemu reboot` comes back stock (`activate_on_boot` is off), release still installed; `--verify` passes again; Updates still off; sync still works; no update host was looked up before the reboot |
 | `disable` | With `paper-pure/disable`, three presses leave mods off and `pp-agent.service` is skipped |
-| `status` | The agent's reports are in ppd, read through the gate with the token (403 without): latest release and OS, and one report each for installed, rolled back, forged, tampered, wrong OS. No update host looked up since the reboot |
+| `status` | The agent's reports are in ppd, read through the gate with the token (403 without): latest release and OS, and one report each for installed, rolled back, forged, tampered, wrong OS. The latest carries pp-proxy's sync health (a last good sync, 0 errors), and `/pp/problems` is empty. No update host looked up since the reboot |
 
-Each step runs under a time limit (`timeout`, whole process group); see `STEPS` in `run.sh`. A failed setup step (`build` to `install`) skips the rest; the others carry on, so one run shows every breakage.
+Each step runs under a time limit (`timeout`, whole process group); see `STEPS` in `run.sh`. The limits are for native arm64 and add up to 72.5 min, under `make rung2`'s 75; under qemu both are 4 times that. A failed setup step (`build` to `install`) skips the rest; the others carry on, so one run shows every breakage.
 
 ## Things the emulator had to learn for this
 

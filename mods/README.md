@@ -93,14 +93,24 @@ The same steps for the emulator and the tablet, all over SSH. The tablet needs n
   - A hand install it finds there is kept as `xovi.manual-<time>`.
 - **`hooks/deactivate.sh`**: `reset-failed`, `xovi/stock`, then makes sure: unmount the drop-in, `daemon-reload`, and restart xochitl only if it is down or still has xovi preloaded (`/proc/<MainPID>/environ`). It is idempotent.
 - **`checks/20-xovi.sh`**: xochitl has `xovi.so`, `qt-resource-rebuilder.so` and `appload.so` mapped, and the hashtab matches.
+- **`checks/30-appload.sh`**: in this xochitl's own journal (`_PID`), qmldiff logged `Loaded external AppLoad hooks in main UI`, AppLoad logged `Loaded app root`, and qmldiff logged no `Error`, `Failed`, `Warning` or missing hash. A QML patch that no longer applies still leaves `appload.so` mapped; this catches it.
+
+**Rung 3, the checks on the tablet.** The desiderata want "boots, opens a notebook, pen draws, sync completes, AppLoad launches" kept green on the tablet. What runs there:
+
+| Check | How |
+| --- | --- |
+| AppLoad launches | `20-xovi.sh` and `30-appload.sh` at every install, turn-on and boot, and again every update run (30 min awake) while mods are live; the result is in every status report (`checks`) and on ppd's `/pp/problems` |
+| Sync completes | pp-proxy's `sync.json` (last good `/sync/` request, errors) in every status report (`sync`); `/pp/problems` flags a last error newer than the last good sync. Not a release check: sync is not a mod, and a release must not roll back because Wi-Fi was off |
+| Boots | Every boot ends with a status report; the boot-loop guard and rm-sanity wait in the agent and device lanes |
+| Opens a notebook, pen draws | **Hardware only.** The tablet has no way to inject pen input without a mod of its own. Off the tablet: `test/e2e` draws in a notebook and finds the strokes on the server (step `sync`, before any release), and the manual-install pass below drew with mods on |
 
 Pack with `-expect-mapped xovi.so -expect-mapped appload.so`. Bake the release id into the apps with `RELEASE_ID=<id> mods/build.sh`.
 
 ## Kill switch: triple-press, reboot, rollback
 
-The desiderata: "Triple-press power disables all mods. Reboot returns stock UI." That is now literally true, and all of it lives in `pp-agent` (`agent/README.md`, "Three ways back to stock"):
+The desiderata: "Triple-press power disables all mods. Reboot returns stock UI." Both hold in the emulator (`test/e2e`) and the device test bed; a triple-press on real hardware, across real sleep and wake, is not checked yet. All of it lives in `pp-agent` (`agent/README.md`, "Three ways back to stock"):
 
-- **Triple-press power toggles mods.** `pp-agent-tripletap.service` reads the power key and runs `pp-agent toggle`: mods on means `deactivate.sh` (stock UI); mods off means `activate.sh` plus the health check of the committed release. One path turns mods on, so a broken release can't come back unchecked.
+- **Triple-press power toggles mods.** `pp-agent-tripletap.service` reads the power key and runs `pp-agent toggle`: mods on means `deactivate.sh` (stock UI); mods off means `activate.sh` plus the health check of the committed release. One path turns mods on, so a broken release can't come back unchecked. Off sticks: no install or boot turns mods on again until the next triple-press. Mods started by hand (`mods/install.sh`) with no release installed are turned off with xovi's own `stock` script.
 - **Reboot is stock.** `xovi/start`'s drop-in is on a tmpfs, and `pp-agent boot` does not activate (`activate_on_boot: false`). Mods come back by a triple-press or the next install. To keep mods across reboots instead: `"activate_on_boot": true` in `agent.json`.
 - **Auto-rollback** at install, or at the next boot if the check was cut short.
 - **File switch:** `touch /home/root/paper-pure/disable`. Nothing turns mods on; a triple-press only turns them off.
@@ -174,7 +184,7 @@ Run on Oct 25 2026: x86_64 dev container, 4 vCPU, arm64 through qemu-user, emula
 
 The emulator was left running the final artifact through the manual install (xovi ON, AppLoad in the side menu). `ppemu restart` brings stock back, and `ppemu reset` wipes everything back to a factory-fresh stock device.
 
-**Rung 2, through the update agent**
+**Superseded (first phase, Oct 25 morning): rung 2 through the update agent, and the xovi-tripletap rig below.** The emulator then had a fake `systemctl` with no `show`, `activate_on_boot` defaulted to true, and `device/emu-start` existed. All three are gone. `test/e2e` now does install, rollback, triple-press and reboot on the emulator's real systemd (steps `ota`, `killswitch`, `reboot`); see `test/e2e/README.md`. Kept for the record:
 
 `agent/out/ppsign` and `pp-agent-arm64`, throwaway keys in scratch, feed served on 172.17.0.1:3091.
 
@@ -241,4 +251,4 @@ The rig: xovi-tripletap v1.1.1 `main.sh` unmodified, run by hand (no systemd), w
 
 1. **Kill switch: decided per the spec.** Triple-press toggles through `pp-agent`, reboot is stock (`activate_on_boot: false`). Flip that one line in `agent.json` if mods should survive reboots.
 2. **AppLoad on 3.27.2.2 is pinned to v0.5.3** (May 2026). Newer AppLoad features (multitouch fixes, rotation) need 3.28+ hooks. Fine to stay there while the OS is frozen?
-3. **Moving off qemu.** A first build takes about 30 min under qemu on x86. The same Dockerfile on GitHub's `ubuntu-24.04-arm` runners should be a few minutes. Move CI there?
+3. **Moving off qemu: done for CI.** `proofs`, `rung2` and `release` run on GitHub's `ubuntu-24.04-arm` runners (a cold mods build there takes about 3 min). The dev container is still x86 under qemu (`docs/decisions.md`, "Emulator host").

@@ -43,9 +43,13 @@ PP=/home/root/paper-pure
 BLOCKED='device\.cloud\.remarkable\.com|device\.memfault\.com|enterprise\.cloud\.remarkable\.com|remarkable-software\.s3'
 export PP_SSH_OPTS='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR'
 
-# name timeout(s) hard: a failed hard step skips the rest
-STEPS="build:3600:1 emulator:900:1 server:300:1 install:600:1 freeze:600:0 sync:1200:0
-ota:2400:0 killswitch:1200:0 reboot:1200:0 disable:600:0 status:300:0"
+# name limit hard: a failed hard step skips the rest. Limits are seconds on
+# native arm64 (CI), times 4 under qemu, like the Makefile's. They add up to
+# 72.5 min, under rung2's own 75 min, so a hang fails one step and the rest
+# still report. Typical native times: build 3 min cold, ota 5, the rest 2 or less.
+QEMU=4; case $(uname -m) in aarch64 | arm64) QEMU=1 ;; esac
+STEPS="build:900:1 emulator:240:1 server:120:1 install:300:1 freeze:240:0 sync:450:0
+ota:900:0 killswitch:450:0 reboot:450:0 disable:180:0 status:120:0"
 
 # ---------------------------------------------------------------- helpers
 
@@ -133,7 +137,7 @@ build_hello() { # release-id dir: the hello app with this release id baked in
         RELEASE_ID=$1 RCC=$rcc "$REPO/apps/hello/build.sh" "$2"
     else   # no Qt on the host: the Qt stage of mods/build/Dockerfile (step_build loads it)
         mkdir -p "$(dirname "$2")"
-        docker run --rm --platform linux/arm64 -e RELEASE_ID="$1" -e RCC=/usr/lib/qt6/libexec/rcc \
+        docker run --rm --platform linux/arm64 --user "$(id -u):$(id -g)" -e RELEASE_ID="$1" -e RCC=/usr/lib/qt6/libexec/rcc \
             -v "$REPO/apps/hello:/hello:ro" -v "$(dirname "$2"):/out" pp-e2e-qt:latest /hello/build.sh "/out/$(basename "$2")"
     fi
 }
@@ -363,6 +367,12 @@ step_sync() {
 
 step_ota() {
     local stamp good bad forged tampered wrongos t
+    # Every agent run in this step and the next is ours: the timer (3 min
+    # after boot, then every 30) could install a release before we ask, and
+    # a timer run during a triple-press counts as "busy, so off". A reboot
+    # starts it again.
+    dev 'systemctl stop pp-agent.timer; while [ "$(systemctl is-active pp-agent.service)" = activating ]; do sleep 2; done'
+    ok "pp-agent.timer stopped; no agent run in flight"
     stamp=$(date -u +%m%d%H%M)
     good=e2e-$stamp-good bad=e2e-$stamp-broken forged=e2e-$stamp-forged tampered=e2e-$stamp-tampered wrongos=e2e-$stamp-wrongos
     echo "$good" > "$W/good-release"
@@ -376,8 +386,14 @@ step_ota() {
     agent_update
     eq "installed" "$(jget release < "$W/agent-status.json")" "$good"
     eq "live" "$(jget live < "$W/agent-status.json")" "$good"
-    has "result" "$(jget last_result < "$W/agent-status.json")" "installed"
+    has "agent log" "$(dev "cat $PP/state/agent.log")" "result: installed $good"
+    has "agent log: the AppLoad check ran" "$(dev "cat $PP/state/agent.log")" "ran releases/$good/checks/30-appload.sh (install"
+    eq "checks in the status (reason ok)" "$(jget checks reason < "$W/agent-status.json") $(jget checks ok < "$W/agent-status.json")" "install true"
     has "xovi status" "$(dev /home/root/xovi/paper-pure/status)" "mapped appload.so"
+    # Nothing new: the run re-checks the live release and reports it.
+    agent_update
+    has "result" "$(jget last_result < "$W/agent-status.json")" "up to date ($good)"
+    eq "recheck in the status (reason ok)" "$(jget checks reason < "$W/agent-status.json") $(jget checks ok < "$W/agent-status.json")" "recheck true"
     local smoke
     smoke=$("$REPO/mods/emu-smoke.sh" "$SHOTS/ota-hello" 2>&1) || { echo "$smoke"; die "mods/emu-smoke.sh"; }
     has "hello shows the new release" "$smoke" "release $good"
@@ -513,6 +529,13 @@ for r in json.load(sys.stdin): print(r.get("last_result", ""), "|", r.get("last_
     has "a report says tampered" "$results" "sha256"
     has "a report says wrong OS" "$results" "3.27.3.0"
     has "ppd log" "$(docker logs "$SERVER" 2>&1)" "status tatsu: os=$OS release=\"$good\""
+    # Sync health from pp-proxy rides in the report; ppd's problem list is empty.
+    eq "latest report: sync errors" "$(jget 0 sync errors <<<"$s")" 0
+    has "latest report: sync last_ok" "$(jget 0 sync last_ok <<<"$s")" "$(date -u +%Y)"
+    local p
+    p=$(gate "$GATE/pp/problems" || true)
+    echo "$p" > "$LOGS/problems.json"
+    eq "/pp/problems (backups off here; tablet, sync and checks fine)" "$(jget ok <<<"$p")" true
     dns_check end
 }
 
@@ -550,16 +573,28 @@ echo "e2e: logs and screenshots in $OUT"
 failed=0 skip=""
 for s in $STEPS; do
     IFS=: read -r name limit hard <<<"$s"
+    limit=$((limit * QEMU))
     if [ -n "$skip" ]; then printf 'SKIP  %-10s (%s failed)\n' "$name" "$skip"; continue; fi
-    t0=$SECONDS
-    if timeout -k 30 "$limit" "$SELF" --step "$name" > "$LOGS/$name.log" 2>&1; then
+    t0=$SECONDS beat=$SECONDS rc=0
+    timeout -k 30 "$limit" "$SELF" --step "$name" > "$LOGS/$name.log" 2>&1 &
+    pid=$!
+    while kill -0 "$pid" 2>/dev/null; do   # a heartbeat a minute, so a slow step is not a silent one
+        sleep 5
+        if [ $((SECONDS - beat)) -ge 60 ] && kill -0 "$pid" 2>/dev/null; then
+            beat=$SECONDS
+            printf '....  %-10s %4ds  %s\n' "$name" $((SECONDS - t0)) "$(tail -n 1 "$LOGS/$name.log" | tr -d '\r' | cut -c1-110)"
+        fi
+    done
+    wait "$pid" || rc=$?
+    if [ "$rc" = 0 ]; then
         printf 'PASS  %-10s %4ds\n' "$name" $((SECONDS - t0))
     else
-        rc=$?
         why=$(grep -E 'FAIL' "$LOGS/$name.log" | tail -n 1 | cut -c1-200 || true)
         [ -n "$why" ] || why=$(tail -n 1 "$LOGS/$name.log" | cut -c1-200)
         [ "$rc" != 124 ] || why="timed out after ${limit}s"
         printf 'FAIL  %-10s %4ds  %s  (log: %s)\n' "$name" $((SECONDS - t0)) "${why:-exit $rc}" "$LOGS/$name.log"
+        grep -m 20 -E '\bFAIL\b' "$LOGS/$name.log" | sed 's/^/      ! /' || true
+        tail -n 80 "$LOGS/$name.log" | sed 's/^/      | /'
         failed=$((failed + 1))
         [ "$hard" = 0 ] || skip=$name
     fi

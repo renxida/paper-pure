@@ -26,6 +26,7 @@ Claude: /pp/wishes, /pp/logs (+ the read token), /pp/status
 | | |
 | --- | --- |
 | `GET /pp/healthz` | 200 if rmfakecloud answers, 503 if not. Includes the last backup |
+| `GET /pp/problems` | 200 and an empty list when nothing needs a human, else 503 and the list: rmfakecloud down; the last backup failed or is over 26 h old (with backups on); a tablet silent over 72 h (`PP_REPORT_MAX_AGE`); its newest report says sync is failing (pp-proxy's last error is newer than its last good sync) or its release checks fail. For a daily monitor |
 | `GET /pp/backup` | last backup result (`backup.sh` writes it) |
 | `GET /pp/releases/<device>/<file>` | the feed: `latest.json`, `latest.json.sig`, `<id>.tar.gz`. Range works |
 | `PUT /pp/releases/<device>/<file>` | publish one file, `Authorization: Bearer $PP_PUBLISH_TOKEN` |
@@ -35,7 +36,7 @@ Claude: /pp/wishes, /pp/logs (+ the read token), /pp/status
 | `GET /pp/logs/server.log`, `server.log.1` | the container's log, read-only, Range works. Same token |
 | anything else | rmfakecloud (sync API and web UI) |
 
-Everything under `/pp/` is `Cache-Control: no-store`. Wish pages and logs also get `nosniff` and `Content-Security-Policy: sandbox`, so a browser runs nothing from them. An unset `PP_READ_TOKEN` turns those two off.
+Everything under `/pp/` is `Cache-Control: no-store`. Wish pages, logs and feed files also get `nosniff` and `Content-Security-Policy: sandbox`, so a browser runs nothing from them; feed files other than `.json` go out as `application/octet-stream`, and a PUT may only write `latest.json`, `latest.json.sig`, `<id>.tar.gz`, `<id>.json` or `<id>.json.sig`. This origin is also rmfakecloud's web UI, whose login cookie a page here would ride. An unset `PP_READ_TOKEN` turns wishes and logs off.
 
 `agent.json` on the tablet: `"feed_url": "https://pp.<domain>/pp/releases/tatsu/"`, `"status_url": "https://pp.<domain>/pp/status"`, and the `pp-tablet` token in `headers`.
 
@@ -69,7 +70,8 @@ test/                local-proof.sh, fakeaccess (a stand-in for Cloudflare Acces
 4. **Render:** New > Blueprint, this repo, fill in the `sync: false` values, deploy.
 5. The log says `NO USERS`. In the Render shell: `rmfakecloud-cli setuser -u <email> -a -s` (it prints a password; `-a` admin, `-s` the sync the tablet uses; both are needed), then restart the service. rmfakecloud reads users only at start, and until a user exists the first web login becomes admin. Access keeps everyone but Cedar away from that window.
 6. Check with the `pp-claude` token: `curl -H "CF-Access-Client-Id: …" -H "CF-Access-Client-Secret: …" https://pp.<domain>/pp/healthz`.
-7. **Tablet** (device lane, over USB SSH): `agent.json` as above, then `tablet-proxy/install.sh --runtime`, pair, check sync, then the persistent install. Pairing: Cedar opens `https://pp.<domain>/`, logs in, Code > Generate, and types the code on the tablet under Settings > General > Account.
+7. **Tablet** (over USB SSH): `agent.json` as above, then `device/install.sh --proxy root@10.11.99.1` (docs/runbook-bootstrap.md, step 7). It runs `tablet-proxy/install.sh --runtime` and persists that with `pp-device.sh`; there is no other install. Pairing: Cedar opens `https://pp.<domain>/`, logs in, Code > Generate, and types the code on the tablet under Settings > General > Account.
+8. **Monitor:** something hits `GET /pp/problems` daily with the `pp-claude` token and tells Cedar on a 503: a scheduled Claude task, or an uptime monitor that can send Access headers (docs/cedar-checklist.md).
 
 ### Publish a release (CI)
 
@@ -118,6 +120,8 @@ Change `RMFAKECLOUD_COMMIT` or a digest in `Dockerfile`, or a version and its ha
 
 Make a new token in Zero Trust, put it in `agent.json` on the tablet, restart `pp-proxy` (`pp-agent` reads the file every run), delete the old token. To lock the tablet out right away, delete the token or remove its policy.
 
+**This needs the USB cable**: `agent.json`, `pp-agent` and `pp-proxy` are installed once over SSH and are not part of a release (a broken agent could not roll itself back). So make the tablet's token **non-expiring**: an expired token cuts sync and the release feed at once, and only a cable fixes it. Revoking still works any time. Rotate only when it may have leaked.
+
 ## Secrets (names only)
 
 | Name | Lives in | What |
@@ -158,6 +162,13 @@ PP_BUILD_CA=/root/.ccr/ca-bundle.crt make proof   # in the dev container (TLS-in
 
 ## Status
 
+Review fixes (Oct 25, 2026, evening, dev container):
+
+- `make test` passes. New ppd tests: a PUT of `x.svg`, `notes.html` or a name without an extension is refused (400) even with the publish token; `<id>.tar.gz` and `.json.sig` are served as `application/octet-stream`, `latest.json` as JSON, all three with `nosniff` and `sandbox` (before: an uploaded `.html` came back as `text/html` on rmfakecloud's origin). `/pp/problems` goes from 200 to 503 and back through each case: no backup yet, a failed backup, one older than 26 h, a tablet report older than 72 h, sync failing (last error newer than last good sync), checks failing, then all good. pp-proxy test: `sync.json` counts only `/sync/` successes, any 4xx/5xx as an error with its path.
+- `PP_BUILD_CA=/root/.ccr/ca-bundle.crt make proof`: **PASS 95**, 2.5 min, nothing left running. New: pp-proxy's `sync.json` after the simulated tablet's sync (`ok > 0`, `last_ok` set, 0 errors); `/pp/problems` says nothing needs a human after the backup, and `backup: none has run yet` with a 503 on the wiped server; `tablet-proxy/install.sh` with no argument refuses and changes nothing (its persistent and `--uninstall` modes are gone: `umount -R /etc` broke SSH until a reboot, `device/install.sh --proxy` persists instead).
+- `pp-proxy.service` is ordered `Before=rm-sync`, no longer `Before=xochitl`: see `tablet-proxy/README.md` and `device/README.md` (passcode scenario).
+- `render.yaml`: `autoDeployTrigger: checksPass`. The field and value are from Render's API client in `render-oss/cli` (`autodeploy_gen.go`: `checksPass`, `commit`, `off`); not tried on Render.
+
 Verified (Oct 25, 2026, in the dev container), wishes and logs:
 
 - `make test`: `go vet` clean, `go test -race` passes, shellcheck clean. New ppd tests: wish pages and logs refused with no token, a wrong one, the publish token, `Bearer ` with nothing after it, and a token without `Bearer`; refused even for missing files, so nothing leaks by 404 vs 403; served with the token, `index.json` as JSON, the log as `text/plain` whatever is in it, `nosniff` and `sandbox` on both; `PUT`, `POST`, `DELETE` give 405 and change nothing; dot folders (a scan in progress), `..`, a third level, `/pp/logs/.hidden` give 404; a Range tail of the log; an unset token turns both off. `logtee`: stdout byte for byte, UTC times in the file, rotation keeps the newest lines in order with none missing, and an unwritable file still copies everything to stdout plus one warning.
@@ -196,7 +207,7 @@ Not verified:
 - Anything on real Cloudflare (tunnel, Access policies, service tokens, the 401 setting, websockets through the tunnel) or on Render (Blueprint, disk, BuildKit `ADD <git>` and `--mount=type=secret` in their builder, shell, log retention). No accounts were made.
 - Real sync from a real tablet. (From the emulator's stock xochitl on 3.27.2.2 it works: see `test/e2e/README.md`.)
 - restic against B2, and the no-`deleteFiles` key setup.
-- The persistent tablet install and `--uninstall`.
+- The tablet install on hardware (`device/install.sh --proxy`; tablet-proxy's own persistent mode is gone).
 - Restores of large data sets (the drill had 15 files).
 
 Open questions for Cedar:
@@ -207,5 +218,5 @@ Open questions for Cedar:
 - **Server logs for Claude:** done as option (c): the container keeps its own rotated log and ppd serves it to `PP_READ_TOKEN`. Render's API key (full account access) stays with Cedar.
 - **Status reads:** `/pp/status/<device>` stays open to every token that passes Access (the tablet's and CI's too), as before; it holds what the tablet runs and its agent log, not notes. Move it behind the read token as well? `test/e2e` would need to send it.
 - **A tighter Access app for Claude (optional):** a second Access app on `pp.<domain>/pp/` paths only, for the `pp-claude` policy, would keep Claude's Access token off rmfakecloud's pages entirely. Not needed while rmfakecloud's login guards them.
-- **Auto-deploy:** `render.yaml` redeploys on every merge to main that touches `server/`. OK?
-- **Token lifetime:** service tokens expire after the duration you pick. One year with a reminder, or non-expiring?
+- **Auto-deploy:** `render.yaml` deploys a main commit that touches `server/` once its CI checks pass (`autoDeployTrigger: checksPass`). OK?
+- **Token lifetime:** non-expiring for `pp-tablet` (recommended: renewing it needs the cable, see "Rotate"); CI's and Claude's can expire, they are renewed without the tablet.

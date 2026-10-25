@@ -2,6 +2,8 @@
 # Rung 1: run one AppLoad app in AppLoad's PC emulator, headless, and save a
 # screenshot of the Pure-sized screen (1404x1872).
 #   mods/host/run.sh APP_DIR OUT.png [DELAY_MS]
+#   PP_EVENTS="tap X Y; wait MS; shot /out/NAME.png"   then taps and more
+#   screenshots (shot.cpp); /out is OUT.png's directory
 # APP_DIR is a built app (manifest.json + resources.rcc), e.g.
 # apps/hello/out/paper-pure-hello. Builds the image pp-mods-host on first use.
 set -euo pipefail
@@ -27,5 +29,5 @@ fi
 outdir=$(cd "$(dirname "$out")" && pwd)
 docker run --rm --name "pp-mods-host-$$" \
     -v "$app:/opt/appload/applications_root/$id:ro" -v "$outdir:/out" \
-    -e PP_SHOT="/out/$(basename "$out")" -e PP_SHOT_DELAY_MS="$delay" \
+    -e PP_SHOT="/out/$(basename "$out")" -e PP_SHOT_DELAY_MS="$delay" -e PP_EVENTS="${PP_EVENTS:-}" \
     "$image" "$id"

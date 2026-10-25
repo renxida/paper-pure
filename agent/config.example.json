@@ -1,6 +1,6 @@
 {
-  "feed_url": "https://paper-pure.example.org/releases/tatsu/",
-  "status_url": "https://paper-pure.example.org/api/tablet/status",
+  "feed_url": "https://pp.example.org/pp/releases/tatsu/",
+  "status_url": "https://pp.example.org/pp/status",
   "headers": {
     "CF-Access-Client-Id": "REPLACE.access",
     "CF-Access-Client-Secret": "REPLACE"

@@ -194,7 +194,19 @@ jobs:
             echo "::error title=Feed secrets incomplete::Set all four or none. Missing: ${miss[*]}"
             exit 1
           else
-            make publish
+            # Only main's tip ships: a re-run of an older run, or one that
+            # finished late, must not replace newer code. make publish also
+            # skips a release not newer than the live one, or built from the
+            # same mods/ and apps/ as it.
+            tip=$(git ls-remote "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" refs/heads/main | cut -f1) || true
+            if [ -z "$tip" ]; then
+              echo "::error title=Cannot read main::git ls-remote gave nothing"
+              exit 1
+            elif [ "$tip" != "$GITHUB_SHA" ]; then
+              echo "::notice title=Not published::main is at ${tip:0:7} now, not ${GITHUB_SHA:0:7}; its own run publishes."
+            else
+              make publish
+            fi
           fi
       - if: always()
         run: |

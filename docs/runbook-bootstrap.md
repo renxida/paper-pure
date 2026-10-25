@@ -88,7 +88,7 @@ mods/build.sh
 mods/install.sh root@10.11.99.1     # by hand, for bring-up; tethered: a reboot is stock
 ```
 
-From then on mods arrive as signed releases through `pp-agent`.
+From then on mods arrive as signed releases through `pp-agent`. Until the first release lands, a triple-press turns these hand-installed mods off with xovi's own `stock` script; turning them on again needs a release (or the command above).
 
 **human**, once a release is on: press the power button three times, each within 3 s of the last. The tablet sleeps and wakes in between, that's fine. A few seconds later the UI restarts without mods (no AppLoad in the side menu). Three more presses bring them back. Tell Claude if it didn't: `ssh root@10.11.99.1 journalctl -u pp-agent-tripletap` shows what the agent saw. (Never checked on hardware yet: whether the press that wakes the tablet is seen.)
 
@@ -100,6 +100,16 @@ device/install.sh --proxy root@10.11.99.1     # needs agent.json from step 6
 ```
 
 This puts `pp-proxy` in front of stock sync: the reMarkable cloud names point at `127.0.0.1`, and the proxy forwards to our server with the tablet's token. It is persisted the same way as the freeze.
+
+Then reboot and verify, as after step 4. A unit that boots wrong shows up here, next to the change, and not weeks later:
+
+```bash
+ssh root@10.11.99.1 systemctl reboot
+# wait about a minute
+device/install.sh --verify root@10.11.99.1    # includes "xochitl waits for nothing of ours"
+```
+
+**human**: if a passcode is set (now or ever), the tablet must still show the passcode screen after a reboot. That is the case `--verify` guards: nothing of ours may run before xochitl, because `/home` (where all of ours lives) unlocks only once the passcode is typed into xochitl. See `docs/firmware.md`.
 
 **human**, after step 8 (it needs Wi-Fi): Settings > General > Account > pair, with the one-time code from the rmfakecloud web UI on our server.
 
@@ -124,7 +134,7 @@ From lightest to heaviest:
 
 | What | How | Cable? |
 | --- | --- | --- |
-| Mods off now | **Triple-press power.** Mods come back with another triple-press, or with the next release | no |
+| Mods off now | **Triple-press power.** They stay off, through reboots and new releases, until the next triple-press (updates wait too) | no |
 | Mods off, stock UI | **Reboot.** The tablet starts stock; mods come back with a triple-press or the next release | no |
 | A bad release | Nothing to do: `pp-agent` rolls back by itself when the health check fails, at install or at the next boot | no |
 | Mods off for good | `ssh root@10.11.99.1 touch /home/root/paper-pure/disable`: nothing turns mods on any more (a triple-press only turns them off). Remove the file to undo | USB for SSH |

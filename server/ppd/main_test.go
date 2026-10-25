@@ -345,3 +345,74 @@ func TestBearer(t *testing.T) {
 		}
 	}
 }
+
+// Feed files are served as data: this origin is also rmfakecloud's web UI,
+// so an HTML or SVG file here must never run in Cedar's browser.
+func TestFeedIsNeverActiveContent(t *testing.T) {
+	_, ts, _ := setup(t, "s3cret")
+	auth := []string{"Authorization", "Bearer s3cret"}
+	for _, bad := range []string{"x.svg", "notes.html", "noext"} {
+		if code, _, _ := do(t, "PUT", ts.URL+"/pp/releases/tatsu/"+bad, "<html><script>1</script>", auth...); code != 400 {
+			t.Fatalf("PUT %s: got %d, want 400", bad, code)
+		}
+	}
+	for name, want := range map[string]string{"r1.tar.gz": "application/octet-stream", "r1.json.sig": "application/octet-stream", "latest.json": "application/json"} {
+		if code, _, _ := do(t, "PUT", ts.URL+"/pp/releases/tatsu/"+name, "<html><script>alert(1)</script></html>", auth...); code != 204 {
+			t.Fatalf("PUT %s: %d", name, code)
+		}
+		_, _, h := do(t, "GET", ts.URL+"/pp/releases/tatsu/"+name, "")
+		if h.Get("Content-Type") != want || h.Get("X-Content-Type-Options") != "nosniff" || h.Get("Content-Security-Policy") != "sandbox" {
+			t.Fatalf("%s: %v", name, h)
+		}
+	}
+}
+
+func TestProblems(t *testing.T) {
+	s, ts, _ := setup(t, "")
+	get := func() (int, []string) {
+		t.Helper()
+		code, body, _ := do(t, "GET", ts.URL+"/pp/problems", "")
+		var out struct {
+			Problems []string `json:"problems"`
+		}
+		if err := json.Unmarshal([]byte(body), &out); err != nil {
+			t.Fatalf("%v: %s", err, body)
+		}
+		return code, out.Problems
+	}
+	if code, p := get(); code != 200 || len(p) != 0 {
+		t.Fatalf("fresh server, backups off: %d %v", code, p)
+	}
+	s.backupMaxAge, s.reportMaxAge = 26*time.Hour, 72*time.Hour
+	want := func(sub string) {
+		t.Helper()
+		code, p := get()
+		if code != 503 || !strings.Contains(strings.Join(p, "\n"), sub) {
+			t.Fatalf("want 503 with %q, got %d %v", sub, code, p)
+		}
+	}
+	want("backup: none has run yet")
+	last := filepath.Join(s.data, "backup", "last.json")
+	os.WriteFile(last, []byte(`{"ok":false,"finished":"2026-10-25T03:20:00Z","error":"restic backup failed"}`), 0o644)
+	want("backup: the last one failed (2026-10-25T03:20:00Z): restic backup failed")
+	os.WriteFile(last, []byte(`{"ok":true,"finished":"2026-10-23T03:20:00Z"}`), 0o644)
+	want("more than 26h0m0s ago")
+	os.WriteFile(last, []byte(`{"ok":true,"finished":"2026-10-25T03:20:00Z"}`), 0o644)
+	if code, p := get(); code != 200 {
+		t.Fatalf("good backup: %d %v", code, p)
+	}
+	// Tablets: the newest report decides. The clock is 2026-10-25 10:00.
+	dir := filepath.Join(s.data, "status", "tatsu")
+	os.MkdirAll(dir, 0o755)
+	report := func(name, body string) { os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644) }
+	report("20261021T100000.000000000Z.json", `{"device":"tatsu"}`)
+	want("tablet tatsu: last report 2026-10-21T10:00:00Z")
+	report("20261025T095000.000000000Z.json", `{"device":"tatsu","sync":{"last_ok":"2026-10-25T08:00:00Z","errors":3,"last_error":{"time":"2026-10-25T09:40:00Z","code":403,"path":"eu.tectonic.remarkable.com/sync/v4/root"}}}`)
+	want("tablet tatsu: sync failing since a 403 on eu.tectonic.remarkable.com/sync/v4/root")
+	report("20261025T095500.000000000Z.json", `{"device":"tatsu","sync":{"last_ok":"2026-10-25T09:50:00Z","errors":3,"last_error":{"time":"2026-10-25T09:40:00Z","code":403,"path":"x"}},"checks":{"release":"r7","ok":false,"error":"appload hooks missing"}}`)
+	want("tablet tatsu: checks of r7 failed")
+	report("20261025T095800.000000000Z.json", `{"device":"tatsu","sync":{"last_ok":"2026-10-25T09:50:00Z"},"checks":{"release":"r7","ok":true}}`)
+	if code, p := get(); code != 200 {
+		t.Fatalf("all good again: %d %v", code, p)
+	}
+}

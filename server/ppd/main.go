@@ -2,6 +2,8 @@
 // platform: one file, stdlib only.
 //
 //	GET  /pp/healthz                   200 if rmfakecloud answers, plus last backup
+//	GET  /pp/problems                  200 if nothing needs a human, else 503 and a list:
+//	                                   backups failing or late, a tablet silent, sync or checks failing
 //	GET  /pp/backup                    last backup result (written by backup.sh)
 //	GET  /pp/releases/<device>/<file>  the release feed, static, Range works
 //	PUT  /pp/releases/<device>/<file>  publish one file (needs PP_PUBLISH_TOKEN)
@@ -47,6 +49,8 @@ import (
 var (
 	deviceRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
 	fileRe   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+	// What a feed holds: latest.json(.sig), <id>.tar.gz, <id>.json(.sig).
+	feedRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.(tar\.gz|json|json\.sig)$`)
 )
 
 const (
@@ -63,6 +67,9 @@ type server struct {
 	readToken    string
 	keep         int
 	now          func() time.Time
+	// For /pp/problems; 0 turns a check off.
+	backupMaxAge time.Duration // the last backup must be newer than this
+	reportMaxAge time.Duration // each tablet must have reported within this
 }
 
 func main() {
@@ -80,6 +87,8 @@ func main() {
 	logs := flag.String("logs", "/data/log", "log dir (ppd logtee writes it)")
 	up := flag.String("upstream", "http://127.0.0.1:3000", "rmfakecloud")
 	keep := flag.Int("keep", 500, "status reports kept per device")
+	backupAge := flag.Duration("backup-max-age", 0, "/pp/problems: a backup older than this is a problem (0 = backups not set up)")
+	reportAge := flag.Duration("report-max-age", 72*time.Hour, "/pp/problems: a tablet silent longer than this is a problem (0 = off)")
 	flag.Parse()
 	log.SetFlags(0)
 	log.SetPrefix("ppd: ")
@@ -89,6 +98,7 @@ func main() {
 		log.Fatal(err)
 	}
 	s.logs, s.readToken = *logs, os.Getenv("PP_READ_TOKEN")
+	s.backupMaxAge, s.reportMaxAge = *backupAge, *reportAge
 	if s.publishToken == "" {
 		log.Print("PP_PUBLISH_TOKEN not set: publishing is off")
 	}
@@ -129,12 +139,21 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case p == "/pp/healthz" && isRead(r):
 		s.healthz(w, r)
+	case p == "/pp/problems" && isRead(r):
+		s.problems(w, r)
 	case p == "/pp/backup" && isRead(r):
 		s.serveFile(w, r, filepath.Join(s.data, "backup", "last.json"))
 	case len(parts) == 3 && parts[0] == "releases" && deviceRe.MatchString(parts[1]) && fileRe.MatchString(parts[2]):
 		f := filepath.Join(s.data, "releases", parts[1], parts[2])
 		switch {
 		case isRead(r):
+			// Feed files are data, never a page: this origin is also
+			// rmfakecloud's web UI, whose login cookie a page here would ride.
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+			w.Header().Set("Content-Security-Policy", "sandbox")
+			if !strings.HasSuffix(f, ".json") {
+				w.Header().Set("Content-Type", "application/octet-stream")
+			}
 			s.serveFile(w, r, f)
 		case r.Method == http.MethodPut:
 			s.publish(w, r, f)
@@ -245,6 +264,96 @@ func (s *server) healthz(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, code, out)
 }
 
+// problems lists what needs a human, for a daily monitor (an uptime check
+// or a scheduled Claude task, through Access). 200 and an empty list when
+// all is well, 503 otherwise. Row 1 of the desiderata must not fail
+// silently: backups, and notes reaching the server.
+func (s *server) problems(w http.ResponseWriter, r *http.Request) {
+	now := s.now().UTC()
+	p := []string{}
+	c := http.Client{Timeout: 5 * time.Second}
+	if resp, err := c.Get(s.healthURL); err != nil {
+		p = append(p, "rmfakecloud: "+err.Error())
+	} else {
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			p = append(p, "rmfakecloud: "+resp.Status)
+		}
+	}
+	if s.backupMaxAge > 0 {
+		var b struct {
+			OK       bool      `json:"ok"`
+			Finished time.Time `json:"finished"`
+			Error    string    `json:"error"`
+		}
+		raw, err := os.ReadFile(filepath.Join(s.data, "backup", "last.json"))
+		switch {
+		case err != nil:
+			p = append(p, "backup: none has run yet")
+		case json.Unmarshal(raw, &b) != nil:
+			p = append(p, "backup: last.json unreadable")
+		case !b.OK:
+			p = append(p, fmt.Sprintf("backup: the last one failed (%s): %s", b.Finished.Format(time.RFC3339), b.Error))
+		case now.Sub(b.Finished) > s.backupMaxAge:
+			p = append(p, fmt.Sprintf("backup: the last good one finished %s, more than %s ago", b.Finished.Format(time.RFC3339), s.backupMaxAge))
+		}
+	}
+	devs, _ := os.ReadDir(filepath.Join(s.data, "status"))
+	for _, d := range devs {
+		if !d.IsDir() || !deviceRe.MatchString(d.Name()) {
+			continue
+		}
+		p = append(p, s.tabletProblems(d.Name(), now)...)
+	}
+	code := http.StatusOK
+	if len(p) > 0 {
+		code = http.StatusServiceUnavailable
+	}
+	writeJSON(w, code, map[string]any{"ok": len(p) == 0, "time": now, "problems": p})
+}
+
+// tabletProblems reads a tablet's newest report: is it recent, does
+// pp-proxy say sync works, do the release's checks pass?
+func (s *server) tabletProblems(dev string, now time.Time) []string {
+	names := s.reports(filepath.Join(s.data, "status", dev))
+	if len(names) == 0 {
+		return nil
+	}
+	newest := names[len(names)-1]
+	var p []string
+	if t, err := time.Parse("20060102T150405.000000000Z", strings.TrimSuffix(filepath.Base(newest), ".json")); err == nil &&
+		s.reportMaxAge > 0 && now.Sub(t) > s.reportMaxAge {
+		p = append(p, fmt.Sprintf("tablet %s: last report %s, more than %s ago (asleep, offline, or its token refused?)", dev, t.Format(time.RFC3339), s.reportMaxAge))
+	}
+	var st struct {
+		Sync *struct {
+			LastOK    *time.Time `json:"last_ok"`
+			LastError *struct {
+				Time time.Time `json:"time"`
+				Code int       `json:"code"`
+				Path string    `json:"path"`
+			} `json:"last_error"`
+		} `json:"sync"`
+		Checks *struct {
+			Release string    `json:"release"`
+			Time    time.Time `json:"time"`
+			OK      bool      `json:"ok"`
+			Error   string    `json:"error"`
+		} `json:"checks"`
+	}
+	b, err := os.ReadFile(newest)
+	if err != nil || json.Unmarshal(b, &st) != nil {
+		return append(p, fmt.Sprintf("tablet %s: newest report unreadable", dev))
+	}
+	if y := st.Sync; y != nil && y.LastError != nil && (y.LastOK == nil || y.LastError.Time.After(*y.LastOK)) {
+		p = append(p, fmt.Sprintf("tablet %s: sync failing since a %d on %s at %s", dev, y.LastError.Code, y.LastError.Path, y.LastError.Time.Format(time.RFC3339)))
+	}
+	if c := st.Checks; c != nil && !c.OK {
+		p = append(p, fmt.Sprintf("tablet %s: checks of %s failed at %s: %s", dev, c.Release, c.Time.Format(time.RFC3339), c.Error))
+	}
+	return p
+}
+
 // publish writes one feed file atomically. Order is the publisher's job:
 // tarball first, latest.json last (scripts/publish.sh does that).
 func (s *server) publish(w http.ResponseWriter, r *http.Request, path string) {
@@ -254,6 +363,10 @@ func (s *server) publish(w http.ResponseWriter, r *http.Request, path string) {
 	}
 	if !bearer(r, s.publishToken) {
 		http.Error(w, "bad publish token", http.StatusForbidden)
+		return
+	}
+	if !feedRe.MatchString(filepath.Base(path)) {
+		http.Error(w, "a feed holds latest.json, latest.json.sig, <id>.tar.gz, <id>.json and <id>.json.sig", http.StatusBadRequest)
 		return
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

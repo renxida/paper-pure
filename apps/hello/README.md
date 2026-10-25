@@ -7,7 +7,7 @@ manifest.json      AppLoad manifest (id paper-pure-hello, frontend only)
 application.qrc    what goes into resources.rcc
 ui/main.qml        the app; root item has AppLoad's `signal close` and `unloading()`
 build.sh           -> out/paper-pure-hello/{manifest.json,resources.rcc,release-id}
-test.sh            rung 1: run it headless in AppLoad's PC emulator, compare with test/host-golden.png
+test.sh            rung 1: run it headless in AppLoad's PC emulator, compare with test/host-golden.png, tap Close
 ```
 
 - **Release id.** `RELEASE_ID=<id> apps/hello/build.sh` bakes the id into `ui/release.js`, which is generated at build time and never committed. `mods/build.sh` passes its own `RELEASE_ID` through, so the id on screen is the id of the release the tablet runs. The default is `dev-<git short sha>`.
@@ -17,6 +17,8 @@ test.sh            rung 1: run it headless in AppLoad's PC emulator, compare wit
 ## Status
 
 Verified Oct 25 2026 (x86_64 dev container):
+
+- **Rung 1 replays a tap** (review fix, evening). `mods/host/shot.cpp` now plays a script after the first screenshot (`PP_EVENTS="tap 702 1692; wait 1500; shot /out/closed.png"`: a press and release on the Close button's centre, sent to the window). `apps/hello/test.sh` then needs `paper-pure-hello: unloading` in the log and a second screenshot that differs from the golden. `PP_HOST_REBUILD=1 apps/hello/test.sh`: `0 of 2628288 pixels differ`, `[AppLoad]: Unloading frontends of paper-pure-hello`, `test: Close closed the app`, 35 s with the image rebuild. Negative checks: a tap at (100, 400) leaves the app open (no `unloading`, the screen identical to the golden, so the test fails); a bad event stops the run with exit 2. `make rung1`: 8 of 8.
 
 - **Rung 1.** `apps/hello/test.sh --update` and then `apps/hello/test.sh` both ran AppLoad's PC emulator (rm-appload v0.5.3, Qt 6.8.3, `QT_QPA_PLATFORM=offscreen`). The log shows `paper-pure-hello: shown, release test` and `pp-shot: 1404x1872 -> /out/shot.png (ok)`. `pngdiff` then reported `0 of 2628288 pixels differ`. A run takes about 5 s plus 10 s for the pixel diff. Negative check: a screenshot from a build with another release id differs by 10632 pixels, exit 1.
 - **Rung 2, manual install.** After `mods/install.sh emu` on a freshly reset emulator, the side menu shows **AppLoad**, AppLoad lists **Hello**, and the app shows `release dev-7581a30` and `OS 3.27.2.2`. The xochitl log has `paper-pure-hello: shown, release dev-7581a30`. Close calls `unloading()` (log `[AppLoad]: Resources unloaded for "paper-pure-hello"`). `mods/emu-smoke.sh` does all this in 27 s.

@@ -11,7 +11,7 @@ services:
     region: frankfurt             # pick the one nearest Cedar
     dockerfilePath: ./server/Dockerfile
     dockerContext: ./server
-    autoDeploy: true              # CI gates merges to main; only server/ changes redeploy
+    autoDeployTrigger: checksPass # deploy a main commit only once its CI checks pass; only server/ changes redeploy
     buildFilter:
       paths:
         - server/**

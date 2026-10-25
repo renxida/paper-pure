@@ -11,7 +11,7 @@ The guardrail from the desiderata: nothing merges, and nothing is released, unle
 | `rung1` | `ubuntu-latest` (x86) | `make rung1` | agent and server: `go vet` and `go test -race`; wishes: pytest; arm64 cross-builds; shellcheck on every shell script; actionlint on this workflow; `node --check` on the emulator CLI; hello in AppLoad's PC emulator, pixel-exact against the golden |
 | `proofs` | `ubuntu-24.04-arm` | `make proofs` | agent on the real tatsu userland; the server's local proof (publish, agent install through a fake Access gate, pp-proxy, backup, wipe, restore); wishes against a real rmfakecloud; the device test bed (OS freeze, persistence, kill switch, crash loops under the image's own systemd) |
 | `rung2` | `ubuntu-24.04-arm` | `make rung2` | `test/e2e/run.sh`: the Pure's stock 3.27.2.2 in the emulator with our whole stack |
-| `release` | `ubuntu-24.04-arm` | `make release`, `make publish` | only on a push to `main`, after all three passed: build, sign, publish |
+| `release` | `ubuntu-24.04-arm` | `make release`, `make publish` | only on a push to `main`, after all three passed: build, sign, publish. Only main's tip publishes, and `make publish` skips a release that isn't newer than the live one or was built from the same `mods/` and `apps/` |
 
 Cheapest first: `proofs` and `rung2` start only once `rung1` is green. The arm64 runners are free because the repo is public, and they run the device's arm64 code natively, without qemu.
 
@@ -93,7 +93,8 @@ What the release job does with them:
 - **None set:** it builds, packs with a throwaway key to check the tree, and succeeds with a notice.
 - **No signing key:** nothing is signed and nothing is published.
 - **Some feed secrets but not all:** it fails, because that is a mistake, not a choice.
-- **All set:** `make publish` uploads tarball first and `latest.json` last. Then it reads `latest.json` back through Access and compares bytes, which catches an Access login page posing as success.
+- **All set:** if `main` has moved on since this commit, nothing is published (that commit's own run will). Otherwise `make publish` first reads the live `latest.json` through Access and skips when it is as new or newer, or was built from the same inputs (`server/scripts/publish-check.py`). Then it uploads tarball first and `latest.json` last, reads `latest.json` back and compares bytes, which catches an Access login page posing as success.
+- **Release time is commit time.** `created` in the manifest is the commit's time (`git log -1 --format=%cI`), not the build's, and the tablet takes only releases newer than any it ever had. A re-run of an old job, or a slow one finishing last, can't ship old code as new.
 
 ## The signing key
 
@@ -125,7 +126,14 @@ One more honest note: the release job rebuilds from the same commit rather than 
 
 ## Status
 
-Oct 25 2026, x86_64 dev container (no arm64 machine). The first GitHub runs passed `rung1` and failed `proofs` on the root vs `runner` issues above; the fixes were re-run locally as a non-root user.
+Oct 25 2026. On GitHub, runs 8, 9 and 10 on this branch were green end to end: `rung1` on `ubuntu-latest`, `proofs` and `rung2` on `ubuntu-24.04-arm` as user `runner` (rung2 about 13 min natively, all 11 e2e steps). Earlier runs failed on the root vs `runner` issues above, then once on an e2e race: `pp-agent.timer` installed the release before the `ota` step asked for it. The `ota` step now stops the timer first, and every e2e step prints a heartbeat each minute and, on failure, its FAIL lines and the last 80 lines of its log. The release job has run on no `main` push yet.
+
+Review fixes, checked here (x86_64 dev container):
+
+- `make publish` against the real ppd behind the fake Access gate: a first release publishes; the same one again, and one packed with an older `created`, give `SKIP ... is as new or newer`; a newer one built from the same inputs gives `SKIP ... same inputs`; one with other inputs publishes; a gate that refuses the token (403) fails the target. `publish-check.py` exits 1 on an HTML page.
+- `actionlint` is clean with the main-tip check in the release job. The check itself (`git ls-remote`) has not run on GitHub.
+
+Earlier, in the x86_64 dev container (no arm64 machine):
 
 Verified:
 
@@ -153,9 +161,6 @@ Verified:
 
 Not verified:
 
-- **Any real GitHub Actions run:** the arm64 runners, the cache, artifacts, the environment, or the notice and summary output.
-- **`make rung2`:** not run by this lane, because `test/e2e/run.sh` resets the shared emulator. Its interface (`--skip-build`, `--keep`, `PP_E2E_OUT`) matches the Makefile and the workflow.
-- **`make proofs` on arm64,** and how long it takes there.
-- **The hello golden on GitHub's x86 hardware.** It is pixel-exact here; a different CPU could shift antialiasing.
-- **The `rootfs` target's import path on a fresh machine:** the images already existed here. `emu/tools/import-rootfs.sh` itself was proven by the emu lane.
+- **The release job on GitHub:** the `release` environment, its secrets, the notices, and a publish. rung1, proofs and rung2 do run there (above).
+- **The `rootfs` target's import path on a fresh machine** outside CI: here the images already existed. On GitHub's runners it runs from the cached firmware every time.
 - **Publishing through real Cloudflare Access.**

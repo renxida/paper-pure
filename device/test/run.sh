@@ -208,6 +208,10 @@ dev 'touch /data/internal/rm_enable_ssh_wifi_marker 2>/dev/null || { mkdir -p /d
 check "verify catches the SSH-over-Wi-Fi marker" bash -c "! $(printf '%q ' "$REPO/device/install.sh" -p "$PORT" -i "$WORK/id" --verify root@127.0.0.1) > /dev/null 2>&1"
 inst > "$WORK/5-repair-marker.log" 2>&1
 check "install removes it" dev '! test -e /data/internal/rm_enable_ssh_wifi_marker'
+check "restore refuses a stock path pp-device never changed, and leaves it alone" dev '
+    s=$(md5sum < /etc/issue)
+    if bash /home/root/paper-pure/device/pp-device.sh restore /etc/issue; then exit 1; fi
+    [ "$(md5sum < /etc/issue)" = "$s" ]'
 
 t "6. pp-agent and pp-proxy: installed, persisted, and pp-agent-boot waits for rm-sanity"
 KEYS="$WORK/agentkeys"

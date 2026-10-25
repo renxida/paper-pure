@@ -59,7 +59,11 @@ fi
 PIDS=()
 "${AS_PP[@]}" rmfakecloud &
 PIDS+=($!)
-"${AS_PP[@]}" ppd -addr :3080 -data "$D/pp" -logs "$D/log" -upstream http://127.0.0.1:3000 &
+# /pp/problems: a tablet silent for PP_REPORT_MAX_AGE, and with backups on, a
+# last good backup older than PP_BACKUP_MAX_AGE, are problems.
+PPD=(ppd -addr :3080 -data "$D/pp" -logs "$D/log" -upstream http://127.0.0.1:3000 -report-max-age "${PP_REPORT_MAX_AGE:-72h}")
+[ -z "${RESTIC_REPOSITORY:-}" ] || PPD+=(-backup-max-age "${PP_BACKUP_MAX_AGE:-26h}")
+"${AS_PP[@]}" "${PPD[@]}" &
 PIDS+=($!)
 
 if [ -n "${TUNNEL_TOKEN:-}" ]; then
