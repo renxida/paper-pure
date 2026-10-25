@@ -101,8 +101,9 @@ Out unless a real, specific need forces them back in. Ordinary engineering hygie
 
 First move: stand up the emulator (rung 2) and run a trivial AppLoad "hello" app in it. Nothing touches the tablet, so offline use continues untouched.
 
-- [ ] Which OS version shipped on this unit? (Settings, General, About.) It decides which xovi, AppLoad, and rmfakecloud versions apply, and which rootfs the emulator runs
-- [ ] Is that version inside rmfakecloud's tested range (up to 3.27.1)? If newer, sync is the riskiest piece
+- [x] Which OS version shipped on this unit? **3.27.2.2** (Settings, General, Software; checked Oct 25, 2026). It decides which xovi, AppLoad, and rmfakecloud versions apply, and which rootfs the emulator runs. The unit is not paired with the reMarkable cloud, and that is how it stays
+- [x] Is that version inside rmfakecloud's tested range (up to 3.27.1)? **No**, it is one patch release newer, and rmfakecloud says newer releases are untested. Sync is the riskiest piece: prove it in the emulator before freezing on 3.27.2.2. A downgrade to 3.27.1 is the fallback, and it needs a 3.27.1 image to exist
+- [ ] Until the update block is in place, keep the tablet off Wi-Fi (flight mode on) so it can't move past 3.27.2.2 on its own
 - [ ] Can we get the Pure's root filesystem without dev mode (from a public update image), or only off the device after dev mode?
 - [ ] Which machine runs the emulator: an Apple Silicon Mac, or an arm64 Linux box in the cloud?
 - [ ] Which managed host for the server?
