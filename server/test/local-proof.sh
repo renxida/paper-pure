@@ -11,9 +11,11 @@
 # uploads a PDF, signs a release with a throwaway key (agent lane's ppsign),
 # publishes it, lets the real pp-agent fetch, verify and install it through
 # the gate, receives its status report, pairs a "tablet" through pp-proxy
-# (and checks pp-proxy on the tatsu userland), then runs the backup drill:
-# backup, wipe the data volume, restore, diff, use it. Everything is torn
-# down at the end, pass or fail.
+# (and checks pp-proxy on the tatsu userland), syncs wish pages up the way
+# the tablet does and reads them back as Claude (and nobody else) along
+# with the server log, then runs the backup drill: backup, wipe the data
+# volume, restore, diff, use it. Everything is torn down at the end, pass
+# or fail.
 set -euo pipefail
 
 S="$(cd "$(dirname "$0")/.." && pwd)"       # server/
@@ -32,14 +34,18 @@ ok()   { PASS=$((PASS + 1)); echo "  ok: $*"; }
 die()  { echo "  FAIL: $*" >&2; echo "  workdir kept: $W" >&2; exit 1; }
 eq()   { if [ "$2" = "$3" ]; then ok "$1 = $3"; else die "$1: got '$2', want '$3'"; fi; }
 has()  { case "$2" in *"$3"*) ok "$1 has: $3" ;; *) die "$1: missing '$3' in: ${2:0:400}"; esac; }
+jlen() { python3 -I -c 'import json,sys; print(len(json.load(sys.stdin)))'; }
 jget() { python3 -I -c 'import json,sys; v=json.load(sys.stdin); [v:=v[k] if not k.isdigit() else v[int(k)] for k in sys.argv[1:]]; print(json.dumps(v) if not isinstance(v,str) else v)' "$@"; }
 
-export PP_TEST_JWT PP_TEST_PUBLISH PP_TEST_RESTIC
+export PP_TEST_JWT PP_TEST_PUBLISH PP_TEST_RESTIC PP_TEST_READ PP_TEST_WISHES_EVERY=5
 PP_TEST_JWT=$(openssl rand -base64 48 | tr -d '\n')
 PP_TEST_PUBLISH=$(openssl rand -hex 24)
 PP_TEST_RESTIC=$(openssl rand -hex 24)
-CF_ID="proof-tablet.access"
+PP_TEST_READ=$(openssl rand -hex 24)        # Claude's read token (PP_READ_TOKEN)
+CF_ID="proof-tablet.access"                 # the tablet's Access service token
 CF_SECRET=$(openssl rand -hex 32)
+CL_ID="proof-claude.access"                 # Claude's (pp-claude)
+CL_SECRET=$(openssl rand -hex 32)
 PW=$(openssl rand -hex 12)
 export PP_TEST_BACKUP_AT=03:17
 compose() { docker compose -p "$P" -f "$S/compose.yaml" -f "$S/compose.local.yaml" "$@"; }
@@ -88,7 +94,7 @@ has "healthz" "$(jget rmfakecloud <<<"$H")" "Working"
 logs=$(compose logs app)
 has "entrypoint log" "$logs" "TUNNEL_TOKEN not set, no tunnel"
 # shellcheck disable=SC2016 # expands inside the container
-eq "rmfakecloud and ppd run as" "$(app bash -c 'for p in /proc/[0-9]*; do case $(cat $p/comm 2>/dev/null) in rmfakecloud|ppd) stat -c %U $p ;; esac; done' | sort | uniq -c | tr -s ' ' | tr -d '\n')" " 2 pp"
+eq "rmfakecloud, ppd and ppd logtee run as" "$(app bash -c 'for p in /proc/[0-9]*; do case $(cat $p/comm 2>/dev/null) in rmfakecloud|ppd) stat -c %U $p ;; esac; done' | sort | uniq -c | tr -s ' ' | tr -d '\n')" " 3 pp"
 
 # ---- 2. user + rmfakecloud ------------------------------------------------
 step "2. create the user, log in, upload a PDF"
@@ -108,11 +114,12 @@ has "document list" "$DOCS" "proof-notes"
 
 # ---- 3. fake Access gate --------------------------------------------------
 step "3. fake Cloudflare Access on $GATE (service token required)"
-"$W/bin/fakeaccess" -listen 127.0.0.1:3091 -upstream "$BASE" -id "$CF_ID" -secret "$CF_SECRET" 2> "$W/fakeaccess.log" &
+"$W/bin/fakeaccess" -listen 127.0.0.1:3091 -upstream "$BASE" -id "$CF_ID" -secret "$CF_SECRET" -token "$CL_ID:$CL_SECRET" 2> "$W/fakeaccess.log" &
 PIDS+=($!)
 for _ in $(seq 40); do curl -s -o /dev/null "$GATE/" && break; sleep 0.25; done
 eq "no token" "$(curl -s -o /dev/null -w '%{http_code}' "$GATE/pp/healthz")" 403
 eq "tablet token" "$(curl -s -o /dev/null -w '%{http_code}' -H "CF-Access-Client-Id: $CF_ID" -H "CF-Access-Client-Secret: $CF_SECRET" "$GATE/pp/healthz")" 200
+eq "Claude's token" "$(curl -s -o /dev/null -w '%{http_code}' -H "CF-Access-Client-Id: $CL_ID" -H "CF-Access-Client-Secret: $CL_SECRET" "$GATE/pp/healthz")" 200
 
 # ---- 4. release -----------------------------------------------------------
 step "4. sign a release with a throwaway key and publish it"
@@ -197,8 +204,70 @@ if [ -z "${PP_SKIP_TATSU:-}" ]; then
     ok "pp-proxy on the tatsu userland (above)"
 fi
 
-# ---- 7. backup drill ----------------------------------------------------------
-step "7. backup drill: the scheduled backup fires, then wipe, restore, diff, use"
+# ---- 7. wishes and logs for Claude --------------------------------------------
+step "7. wishes: pages the tablet syncs reach Claude at /pp/wishes, and nobody else"
+X="$(dirname "$S")/tools/wishes/testdata/xochitl"   # 2 notebooks drawn in the emulator: 3 wish pages, 1 not
+claude() { # what Claude runs: its Access token plus the read token
+    curl -fsS -H "CF-Access-Client-Id: $CL_ID" -H "CF-Access-Client-Secret: $CL_SECRET" -H "Authorization: Bearer $PP_TEST_READ" "$@"
+}
+code() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
+# The tablet's sync, as rm-sync does it over sync v3: the files, then each
+# notebook's index, then a new root index, then move the root pointer.
+tab internal.cloud.remarkable.com "/sync/v3/files/$RH" -H "Authorization: Bearer $USR" > "$W/root.old"
+NEWROOT=$(python3 -I "$S/test/tablet-sync.py" "$X" "$W/root.old" "$W/blobs")
+n=0
+for b in "$W"/blobs/*; do
+    if [ "${b##*/}" = "$NEWROOT" ]; then continue; fi
+    tab eu.tectonic.remarkable.com "/sync/v3/files/${b##*/}" -X PUT -H "Authorization: Bearer $USR" --data-binary "@$b" >/dev/null
+    n=$((n + 1))
+done
+tab eu.tectonic.remarkable.com "/sync/v3/files/$NEWROOT" -X PUT -H "Authorization: Bearer $USR" --data-binary "@$W/blobs/$NEWROOT" >/dev/null
+tab eu.tectonic.remarkable.com /sync/v3/root -X PUT -H "Authorization: Bearer $USR" -H 'Content-Type: application/json' \
+    -d "{\"generation\":$(jget generation <<<"$ROOT"),\"hash\":\"$NEWROOT\",\"broadcast\":true}" >/dev/null
+eq "sync root after the tablet's upload ($n blobs + root index, through pp-proxy)" "$(tab internal.cloud.remarkable.com /sync/v3/root -H "Authorization: Bearer $USR" | jget hash)" "$NEWROOT"
+RH=$NEWROOT   # the sync root the restore drill must bring back
+for _ in $(seq 60); do
+    if [ "$(claude "$GATE/pp/wishes/index.json" 2>/dev/null | jlen)" = 3 ]; then break; fi
+    sleep 1
+done
+IDX=$(claude "$GATE/pp/wishes/index.json")
+eq "wish pages the server's scan picked up" "$(python3 -I -c 'import json,sys; print(" ".join(sorted(json.load(sys.stdin))))' <<<"$IDX")" \
+    "64dbef73-9386-453b-8a0d-7270f9b0af1e/46e9adfe-c4e4-43d8-9cd4-b7451d573f1b fd462152-8b8e-4a7e-9b33-32f313c35154/32a1a76a-7cbf-4063-828d-06e7697a5343 fd462152-8b8e-4a7e-9b33-32f313c35154/f12412d5-569f-4688-8a9b-e53c3e2ab887"
+for key in $(python3 -I -c 'import json,sys; print(" ".join(sorted(json.load(sys.stdin))))' <<<"$IDX"); do
+    d=$(jget "$key" dir <<<"$IDX")
+    eq "$d/page.rm == the tablet's page" "$(claude "$GATE/pp/wishes/$d/page.rm" | sha256sum | cut -c1-64)" "$(sha256sum < "$X/$key.rm" | cut -c1-64)"
+    claude -o "$W/page.png" "$GATE/pp/wishes/$d/page.png"
+    eq "$d/page.png" "$(python3 -I -c 'import struct,sys; b=open(sys.argv[1],"rb").read(24); print(b[:8]==b"\x89PNG\r\n\x1a\n", *struct.unpack(">II", b[16:24]))' "$W/page.png")" "True 1404 1872"
+    has "$d/issue.md" "$(claude "$GATE/pp/wishes/$d/issue.md")" "wish \`$key\` r1"
+done
+D1=$(jget "fd462152-8b8e-4a7e-9b33-32f313c35154/32a1a76a-7cbf-4063-828d-06e7697a5343" dir <<<"$IDX")
+U="$GATE/pp/wishes/$D1/page.png"
+eq "no Access token" "$(code "$U")" 403
+eq "Claude's Access token, no read token" "$(code -H "CF-Access-Client-Id: $CL_ID" -H "CF-Access-Client-Secret: $CL_SECRET" "$U")" 403
+eq "the tablet's Access token, no read token" "$(code -H "CF-Access-Client-Id: $CF_ID" -H "CF-Access-Client-Secret: $CF_SECRET" "$U")" 403
+eq "the tablet's Access token, the publish token" "$(code -H "CF-Access-Client-Id: $CF_ID" -H "CF-Access-Client-Secret: $CF_SECRET" -H "Authorization: Bearer $PP_TEST_PUBLISH" "$U")" 403
+eq "the tablet's rmfakecloud token" "$(code -H "CF-Access-Client-Id: $CF_ID" -H "CF-Access-Client-Secret: $CF_SECRET" -H "Authorization: Bearer $USR" "$U")" 403
+eq "Claude, PUT" "$(code -X PUT --data-binary x -H "CF-Access-Client-Id: $CL_ID" -H "CF-Access-Client-Secret: $CL_SECRET" -H "Authorization: Bearer $PP_TEST_READ" "$U")" 405
+eq "Claude, out of the inbox" "$(code --path-as-is -H "CF-Access-Client-Id: $CL_ID" -H "CF-Access-Client-Secret: $CL_SECRET" -H "Authorization: Bearer $PP_TEST_READ" "$GATE/pp/wishes/../status/tatsu")" 404
+sleep $((PP_TEST_WISHES_EVERY + 3))
+eq "a later scan: index.json unchanged" "$(claude "$GATE/pp/wishes/index.json" | sha256sum)" "$(sha256sum <<<"$IDX")"
+
+step "7b. logs: Claude reads the server log and the tablet's reports"
+L=$(claude "$GATE/pp/logs/server.log")
+has "server.log (entrypoint)" "$L" "entrypoint: TUNNEL_TOKEN not set"
+has "server.log (rmfakecloud)" "$L" "got sync completed"
+has "server.log (ppd)" "$L" 'status tatsu: os=3.27.2.2 release="proof1"'
+has "server.log (wish scan)" "$L" "wishes: 3 new"
+has "server.log (a later scan)" "$L" "wishes: 0 new, 3 unchanged"
+has "server.log (refusals)" "$L" "read refused: GET /pp/wishes/$D1/page.png: bad read token"
+eq "server.log lines without a UTC time" "$(grep -cvE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z ' <<<"$L" || true)" 0
+eq "Range: the last 2000 bytes" "$(claude -r -2000 "$GATE/pp/logs/server.log" | wc -c | tr -d ' ')" 2000
+eq "server.log, Claude's Access token only" "$(code -H "CF-Access-Client-Id: $CL_ID" -H "CF-Access-Client-Secret: $CL_SECRET" "$GATE/pp/logs/server.log")" 403
+eq "server.log, the tablet's Access token only" "$(code -H "CF-Access-Client-Id: $CF_ID" -H "CF-Access-Client-Secret: $CF_SECRET" "$GATE/pp/logs/server.log")" 403
+has "tablet log tail (/pp/status/tatsu)" "$(claude "$GATE/pp/status/tatsu?n=5" | jget 0 log_tail)" "proof1"
+
+# ---- 8. backup drill ----------------------------------------------------------
+step "8. backup drill: the scheduled backup fires, then wipe, restore, diff, use"
 has "entrypoint log" "$(compose logs app)" "backup: next run $(date -u +%F) $PP_TEST_BACKUP_AT:00 UTC"
 for _ in $(seq 200); do curl -fsS "$BASE/pp/backup" 2>/dev/null | grep -q '"ok":true' && break; sleep 1; done
 has "the scheduled run (log)" "$(compose logs app)" "backup: ok"
@@ -238,14 +307,15 @@ fi
 TOKEN2=$(curl -fsS -X POST "$BASE/ui/api/login" -H 'Content-Type: application/json' -d "{\"email\":\"$USER_EMAIL\",\"password\":\"$PW\"}")
 has "restored: login + documents" "$(curl -fsS -H "Authorization: Bearer $TOKEN2" "$BASE/ui/api/documents")" "proof-notes"
 eq "restored: tablet status" "$(curl -fsS "$BASE/pp/status/tatsu" | jget release)" proof1
+eq "restored: wish inbox" "$(claude "$GATE/pp/wishes/index.json" | sha256sum)" "$(sha256sum <<<"$IDX")"
 eq "restored: feed" "$(curl -fsS "$BASE/pp/releases/tatsu/latest.json" | sha256sum | cut -c1-64)" "$(sha256sum < "$W/feed/latest.json" | cut -c1-64)"
 eq "restored: the paired tablet's token still syncs" "$(tab internal.cloud.remarkable.com /sync/v3/root -H "Authorization: Bearer $USR" | jget hash)" "$RH"
 "$W/bin/pp-agent" -config "$T/agent.json" report >/dev/null 2>&1
 eq "restored: agent reports again" "$(curl -fsS "$BASE/pp/status/tatsu?n=5" | jget 0 release)" proof1
 eq "restored files owned by pp" "$(app find /data/rmfakecloud ! -user pp | wc -l | tr -d ' ')" 0
 
-# ---- 8. down --------------------------------------------------------------
-step "8. tear down"
+# ---- 9. down --------------------------------------------------------------
+step "9. tear down"
 cleanup
 PIDS=()
 eq "containers left" "$(docker ps -a --filter "name=^${P}" --filter name=pp-server-tatsu -q | wc -l | tr -d ' ')" 0

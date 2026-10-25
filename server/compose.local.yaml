@@ -8,6 +8,8 @@ services:
     environment:
       JWT_SECRET_KEY: ${PP_TEST_JWT:?}
       PP_PUBLISH_TOKEN: ${PP_TEST_PUBLISH:?}
+      PP_READ_TOKEN: ${PP_TEST_READ:?}
+      WISHES_EVERY: ${PP_TEST_WISHES_EVERY:-5}
       RM_HTTPS_COOKIE: "false"
       RESTIC_REPOSITORY: /backup/repo
       RESTIC_PASSWORD: ${PP_TEST_RESTIC:?}

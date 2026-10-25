@@ -7,12 +7,12 @@
 #   tools/wishes/test/rmfakecloud-proof.sh     (needs docker, curl, the venv)
 #   PP_SERVER_IMAGE=...  image with /usr/local/bin/rmfakecloud (default pp-server:local,
 #                        built by `make -C server image`)
-#   PORT=3094            127.0.0.1 port for rmfakecloud while the proof runs
+#   PORT=3194            127.0.0.1 port for rmfakecloud while the proof runs
 #   HASH_SCHEMA_VERSION=3|4   rmfakecloud's root index schema (its default is 3)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 IMG=${PP_SERVER_IMAGE:-pp-server:local}
-PORT=${PORT:-3094}
+PORT=${PORT:-3194}
 PY=${PYTHON:-.venv/bin/python}
 NAME=pp-wishes-rmfc-$$
 W=$(mktemp -d)

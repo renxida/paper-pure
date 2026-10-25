@@ -1,6 +1,6 @@
 # server
 
-The one small managed service: sync (rmfakecloud), the release feed for `pp-agent`, tablet status intake, and nightly encrypted backups off the host. Covers desiderata rows 1 (never lose a note), 5 (sync to infra Cedar owns), 11 (observable) and "Infra and security".
+The one small managed service: sync (rmfakecloud), the release feed for `pp-agent`, tablet status intake, nightly encrypted backups off the host, and the wish inbox and logs Claude reads. Covers desiderata rows 1 (never lose a note), 5 (sync to infra Cedar owns), 9 (wishes from the tablet), 11 (observable) and "Infra and security".
 
 ## How it fits together
 
@@ -9,13 +9,15 @@ Cedar's browser ─┐ Access: login
 Claude, CI ──────┤ Access: service tokens       Cloudflare      one container, one disk at /data
 tablet ──────────┘ Access: service token  ──> Tunnel ──> cloudflared ──> ppd :3080 ──> rmfakecloud :3000
   pp-agent:        /pp/releases, /pp/status                                   restic, nightly ──> Backblaze B2
-  xochitl/rm-sync: /etc/hosts -> pp-proxy 127.0.0.1:443 (adds the token)
+  xochitl/rm-sync: /etc/hosts -> pp-proxy 127.0.0.1:443 (adds the token)     wishes.py, every 15 min
+Claude: /pp/wishes, /pp/logs (+ the read token), /pp/status
 ```
 
-- **One image, four processes.** rmfakecloud (built from a pinned commit), `ppd` (our front door, one Go file), cloudflared, and a restic loop. If a daemon dies, the container exits and the host restarts it.
+- **One image, five jobs.** rmfakecloud (built from a pinned commit), `ppd` (our front door, one Go file), cloudflared, a nightly restic loop, and a wish scan every 15 minutes (`wishes/wishes.py`, see [tools/wishes](../tools/wishes/README.md)). If one dies, the container exits and the host restarts it.
+- **One log.** Everything any of them prints goes through `ppd logtee`: unchanged to stdout (the host's log view) and, with a UTC time in front, to `/data/log/server.log`. At 4 MiB it moves to `server.log.1`, so at most 8 MiB stay on disk. Claude reads it at `/pp/logs/`.
 - **No ports.** In production nothing listens outside the container. cloudflared dials out to Cloudflare.
 - **Cloudflare Access is the gate for everything.** One Access app on `pp.<domain>`: Cedar logs in; the tablet, CI and Claude each have their own service token, revocable alone. Behind it, rmfakecloud's own logins still apply.
-- **The feed is untrusted.** `pp-agent` installs only releases signed with Cedar's key, so a compromised server can't push code. ppd adds one rule of its own: publishing needs `PP_PUBLISH_TOKEN`, which only CI has.
+- **The feed is untrusted.** `pp-agent` installs only releases signed with Cedar's key, so a compromised server can't push code. ppd adds two rules of its own: publishing needs `PP_PUBLISH_TOKEN`, which only CI has, and wish pages and logs need `PP_READ_TOKEN`, which only Claude has. Wish pages are Cedar's notes, and Access lets the tablet's and CI's tokens in too. rmfakecloud's own logins guard everything else of the notes.
 - **The tablet** sends its token from `agent.json`. `pp-agent` does it directly. Stock sync can't add headers, so `pp-proxy` on the tablet does it for them. See [tablet-proxy/README.md](tablet-proxy/README.md).
 - **Host (recommended, Cedar decides):** Render, a background worker with a 5 GB disk. See [hosting.md](hosting.md).
 
@@ -28,26 +30,29 @@ tablet ──────────┘ Access: service token  ──> Tunnel �
 | `GET /pp/releases/<device>/<file>` | the feed: `latest.json`, `latest.json.sig`, `<id>.tar.gz`. Range works |
 | `PUT /pp/releases/<device>/<file>` | publish one file, `Authorization: Bearer $PP_PUBLISH_TOKEN` |
 | `POST /pp/status` | pp-agent's status report. Kept as `status/<device>/<time>.json`, newest 500 |
-| `GET /pp/status/<device>[?n=N]` | the latest report, or the last N, newest first |
+| `GET /pp/status/<device>[?n=N]` | the latest report, or the last N, newest first. The tablet's log tail is in each |
+| `GET /pp/wishes/index.json`, `GET /pp/wishes/<folder>/<file>` | the wish inbox, read-only. `Authorization: Bearer $PP_READ_TOKEN` |
+| `GET /pp/logs/server.log`, `server.log.1` | the container's log, read-only, Range works. Same token |
 | anything else | rmfakecloud (sync API and web UI) |
 
-Everything under `/pp/` is `Cache-Control: no-store`.
+Everything under `/pp/` is `Cache-Control: no-store`. Wish pages and logs also get `nosniff` and `Content-Security-Policy: sandbox`, so a browser runs nothing from them. An unset `PP_READ_TOKEN` turns those two off.
 
 `agent.json` on the tablet: `"feed_url": "https://pp.<domain>/pp/releases/tatsu/"`, `"status_url": "https://pp.<domain>/pp/status"`, and the `pp-tablet` token in `headers`.
 
 ## Files
 
 ```
-Dockerfile           the image: rmfakecloud @ commit, ppd, cloudflared, restic; bases pinned by digest
-entrypoint.sh        starts the daemons, applies a staged restore, runs the backup loop
+Dockerfile           the image: rmfakecloud @ commit, ppd, cloudflared, restic, Python + 2 wheels; bases pinned by digest
+entrypoint.sh        starts the daemons, applies a staged restore, runs the backup and wish loops, keeps the log
 compose.yaml         production shape for any Docker host: no ports
 compose.local.yaml   local proof only: 127.0.0.1:3080, no tunnel, local restic repo
 render.yaml          the recommended host's config
 ppd/                 the front door (main.go + tests)
 backup/              backup.sh, restore.sh
+wishes/              wishes.py (the scanner; tools/wishes has its tests) and requirements.txt (hash-pinned)
 scripts/             publish.sh (CI), rmfakecloud-cli (admin CLI as the right user)
 tablet-proxy/        pp-proxy for the tablet, its unit, install.sh, test-tatsu.sh
-test/                local-proof.sh, fakeaccess (a stand-in for Cloudflare Access)
+test/                local-proof.sh, fakeaccess (a stand-in for Cloudflare Access), tablet-sync.py (a stand-in for rm-sync's upload)
 ```
 
 ## Runbook
@@ -60,7 +65,7 @@ test/                local-proof.sh, fakeaccess (a stand-in for Cloudflare Acces
    - Zero Trust > Access > Applications: a self-hosted app for `pp.<domain>`, all paths. Policies: `cedar` (Allow, Cedar's email), then `pp-tablet`, `pp-ci`, `pp-claude` (each Service Auth, that one token). Turn on returning 401 for failed service auth, so machines get an error instead of a login page.
    - Caching > Cache Rules: bypass cache for `pp.<domain>`.
 2. **Backblaze B2:** a bucket, a key for that bucket only, no `deleteFiles` (see [hosting.md](hosting.md)).
-3. **Secrets:** `openssl rand -base64 48` for `JWT_SECRET_KEY`, and `openssl rand -hex 32` for `PP_PUBLISH_TOKEN` and `RESTIC_PASSWORD`. Put each in the password manager first.
+3. **Secrets:** `openssl rand -base64 48` for `JWT_SECRET_KEY`, and `openssl rand -hex 32` for `PP_PUBLISH_TOKEN`, `PP_READ_TOKEN` and `RESTIC_PASSWORD`. Put each in the password manager first.
 4. **Render:** New > Blueprint, this repo, fill in the `sync: false` values, deploy.
 5. The log says `NO USERS`. In the Render shell: `rmfakecloud-cli setuser -u <email> -a -s` (it prints a password; `-a` admin, `-s` the sync the tablet uses; both are needed), then restart the service. rmfakecloud reads users only at start, and until a user exists the first web login becomes admin. Access keeps everyone but Cedar away from that window.
 6. Check with the `pp-claude` token: `curl -H "CF-Access-Client-Id: …" -H "CF-Access-Client-Secret: …" https://pp.<domain>/pp/healthz`.
@@ -76,13 +81,21 @@ PP_SERVER=https://pp.<domain> PP_PUBLISH_TOKEN=… CF_ACCESS_CLIENT_ID=… CF_AC
 
 The tarball goes first and `latest.json` last. The signing key never touches the server.
 
-### Read what the tablet is doing (Claude)
+### What Claude reads
+
+Claude's environment holds three values: the `pp-claude` Access token (`$ID`, `$SECRET`) and `PP_READ_TOKEN` (`$READ`).
 
 ```sh
-curl -H "CF-Access-Client-Id: $ID" -H "CF-Access-Client-Secret: $SECRET" "https://pp.<domain>/pp/status/tatsu?n=10"
+A=(-H "CF-Access-Client-Id: $ID" -H "CF-Access-Client-Secret: $SECRET" -H "Authorization: Bearer $READ")
+curl -fsS "${A[@]}" "https://pp.<domain>/pp/status/tatsu?n=10"          # what the tablet runs, its failures and log tail
+curl -fsS "${A[@]}" -r -200000 https://pp.<domain>/pp/logs/server.log   # the server log, last 200 kB
+curl -fsS "${A[@]}" https://pp.<domain>/pp/wishes/index.json            # wish pages picked up so far
+curl -fsS "${A[@]}" -o page.png "https://pp.<domain>/pp/wishes/<folder>/page.png"
 ```
 
-Each report has the running release, OS version, failures, the last 30 agent events and the last 4 KiB of `agent.log`. Server logs go to stdout, so they are in Render's log view. ppd logs one line per report (`status tatsu: os=… release=… result=… error=…`).
+- **Tablet:** each status report has the running release, OS version, failures, the last 30 agent events and the last 4 KiB of `agent.log`. ppd logs one line per report (`status tatsu: os=… release=… result=… error=…`).
+- **Server:** `server.log` has every line rmfakecloud, ppd, cloudflared, the backup and the wish scan print, each with a UTC time. It holds days to weeks (8 MiB at most); the host's own log view has the same lines.
+- **Wishes:** a folder per page (`page.png`, `page.svg`, `page.rm`, `wish.json`, `issue.md`). Turning one into an issue is Claude's job: see [tools/wishes](../tools/wishes/README.md).
 
 ### Backups
 
@@ -99,7 +112,7 @@ Lost host: create the service again from the Blueprint with the same secrets fro
 
 ### Upgrade rmfakecloud or a base image
 
-Change `RMFAKECLOUD_COMMIT` or a digest in `Dockerfile`, run `make proof`, merge. Never float a tag.
+Change `RMFAKECLOUD_COMMIT` or a digest in `Dockerfile`, or a version and its hashes in `wishes/requirements.txt` (from PyPI; the Python image and the Pillow wheels must agree on 3.13), run `make proof` here and `make test proof` in `tools/wishes`, merge. Never float a tag.
 
 ### Rotate or revoke the tablet's token
 
@@ -112,11 +125,12 @@ Make a new token in Zero Trust, put it in `agent.json` on the tablet, restart `p
 | `JWT_SECRET_KEY` | host secret store | signs rmfakecloud's tokens. Changing it logs the tablet out |
 | `TUNNEL_TOKEN` | host secret store | cloudflared connector |
 | `PP_PUBLISH_TOKEN` | host and CI | lets CI PUT feed files |
+| `PP_READ_TOKEN` | host and Claude's environment | lets Claude read wish pages and logs |
 | `RESTIC_REPOSITORY`, `RESTIC_PASSWORD` | host secret store | where and how backups are encrypted. **Without the password the backups are noise** |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | host secret store | the B2 key, one bucket only |
 | `pp-tablet` service token | tablet `agent.json` (0600) | the tablet's identity |
 | `pp-ci` service token, `PP_SERVER` | CI | publishing |
-| `pp-claude` service token | Claude's environment | reading status and health |
+| `pp-claude` service token | Claude's environment | gets Claude through Access: status and health, and with `PP_READ_TOKEN` wishes and logs |
 | release signing key | password manager, CI | agent lane; never on the server |
 | rmfakecloud user password | password manager | the web UI |
 | `proxy/key.pem` | the tablet only | made there by `pp-proxy gencert` |
@@ -128,6 +142,9 @@ Every one of these also goes in the password manager. None goes in the repo (`se
 - **rmfakecloud is tested upstream up to OS 3.27.1, and the tablet runs 3.27.2.2.** In the emulator, the stock 3.27.2.2 xochitl and rm-sync pair and sync both ways with the pinned commit through pp-proxy and a stand-in Access gate, unmodified (`test/e2e`, step `sync`). Still unproven on the real tablet.
 - **Cloudflare caps request bodies at 100 MB** on Free and Pro. A single file bigger than that (a huge PDF) can't upload through the tunnel.
 - **Backups read a live directory.** The tablet uploads blobs before it moves the root pointer, so a snapshot taken mid-sync can at worst miss the newest change. 03:17 is a quiet hour, and there are 14 dailies.
+- **The log keeps days to weeks, not months:** 8 MiB at most. The e2e run wrote about 40 KB in 24 minutes of syncing, updating and reporting. Older history lives in the host's log view, for as long as the host keeps it.
+- **Python makes the image bigger:** about 78 MB unpacked (the Python base 45 MB, rmscene and Pillow 33 MB). `docker images` here shows 266 MB before and 369 MB after.
+- **Wishes are 15 minutes behind** the sync at worst (`WISHES_EVERY`, seconds). A scan that meets a half-synced tree fails and the next one catches up.
 - rmfakecloud always starts an MQTT listener on 8883 inside the container. Nothing can reach it: no port is published and the tunnel routes only to 3080.
 - A disk on Render means one instance, and a deploy is a short sync outage. The tablet retries.
 
@@ -135,7 +152,7 @@ Every one of these also goes in the password manager. None goes in the repo (`se
 
 ```sh
 make test     # go vet, go test -race (ppd, pp-proxy), shellcheck. Seconds
-make proof    # test/local-proof.sh: the whole thing below, 2-3 minutes, leaves nothing running
+make proof    # test/local-proof.sh: the whole thing below, about 2 minutes, leaves nothing running
 PP_BUILD_CA=/root/.ccr/ca-bundle.crt make proof   # in the dev container (TLS-intercepting proxy)
 ```
 

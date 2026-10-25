@@ -1,0 +1,16 @@
+# The wish scanner's libraries, in the server image and in tools/wishes' venv.
+# pip install --require-hashes --only-binary=:all: -r requirements.txt
+# Exact versions and wheel hashes (from PyPI). Pillow has one wheel per
+# platform, all for CPython 3.13 (the image runs python:3.13.17): Linux
+# x86_64 and aarch64 (the image, CI), macOS arm64 and x86_64 (a dev venv).
+# Bump on purpose: new version, new hashes, then make test and make proof
+# in tools/wishes and server.
+rmscene==0.8.0 \
+    --hash=sha256:78f2bb8a746ceb6428005aa5fcb576eb7cf10ad537d043c49659c950633b01d1
+packaging==23.2 \
+    --hash=sha256:8c491190033a9af7e1d931d0b5dacc2ef47509b34dd0de67ed209b5203fc88c7
+pillow==13.0.0 \
+    --hash=sha256:5f56499c1a74d2b862beb0c33b8016f99d095858455df9d21583bbbc1c15b582 \
+    --hash=sha256:19b66ca0a4d25cc0200b381ce824c7ea090db61427315e73cfb05dbf1b35c369 \
+    --hash=sha256:f11a3c1358bb3c68012a7b1f41b223c3db9f7bfde90b481df028cfe1c3363313 \
+    --hash=sha256:ef5fe6b7db3f501c56000ba8fe7c7e1a35ca1d45824fbeb95a67daa85cff4dbe

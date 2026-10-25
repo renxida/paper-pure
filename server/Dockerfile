@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1
 # pp-server: the one container. rmfakecloud (sync), ppd (release feed,
-# status intake, front door), cloudflared (the only way in) and restic
-# (nightly off-host backup). See README.md.
+# status intake, front door, wish pages and logs for Claude), cloudflared
+# (the only way in), restic (nightly off-host backup) and the wish scanner
+# (every 15 minutes). See README.md.
 #
 # Every base image is pinned by digest and rmfakecloud by commit. Bump on
 # purpose, in one commit, after the local proof passes (test/local-proof.sh).
@@ -37,15 +38,23 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/ppd ./ppd
 FROM restic/restic:0.19.1@sha256:136600b6ff6843d61d355f7f71f460a166429f35de6fd11b568fece3c9a4d510 AS restic
 FROM cloudflare/cloudflared:2026.10.0@sha256:9b49eed8f62806d5d45ddf59ecefb5710429598ea6d3fcccd2af938f621b2b07 AS cloudflared
 
-FROM debian:trixie-20261020-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
-# No apt: the CA bundle comes from the build stage, setpriv (util-linux) and
-# bash are already in the base. The entrypoint is PID 1 and handles TERM.
+# The official Python image is Debian trixie-slim plus Python (about 45 MB),
+# for the wish scanner (wishes/wishes.py). Its two libraries add about 20 MB.
+FROM python:3.13.17-slim-trixie@sha256:d98cc29d3266e535dd9da1099688d9cb3ca4753813571e071763d17725460962
+# No apt: the base already has the CA bundle, tzdata, setpriv (util-linux)
+# and bash. The entrypoint is PID 1 and handles TERM.
 RUN useradd --system --uid 10001 --home-dir /data --no-create-home --shell /usr/sbin/nologin pp
-COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+# Wheels only, each checked against the sha256 in requirements.txt.
+COPY wishes/requirements.txt /tmp/wishes-requirements.txt
+RUN --mount=type=secret,id=build_ca \
+    if [ -f /run/secrets/build_ca ]; then export PIP_CERT=/run/secrets/build_ca; fi; \
+    pip install --no-cache-dir --disable-pip-version-check --root-user-action=ignore \
+      --require-hashes --only-binary=:all: -r /tmp/wishes-requirements.txt \
+    && rm /tmp/wishes-requirements.txt
 COPY --from=build /out/rmfakecloud /out/ppd /usr/local/bin/
 COPY --from=restic /usr/bin/restic /usr/local/bin/restic
 COPY --from=cloudflared /usr/local/bin/cloudflared /usr/local/bin/cloudflared
-COPY entrypoint.sh backup/backup.sh backup/restore.sh scripts/rmfakecloud-cli /usr/local/bin/
+COPY entrypoint.sh backup/backup.sh backup/restore.sh scripts/rmfakecloud-cli wishes/wishes.py /usr/local/bin/
 ENV PP_DATA=/data \
     BACKUP_AT=03:17 \
     TZ=UTC
@@ -53,3 +62,4 @@ VOLUME /data
 # No EXPOSE: in production nothing listens outside the container.
 # ppd listens on :3080 inside it; cloudflared dials out to Cloudflare.
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD []

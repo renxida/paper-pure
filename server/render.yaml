@@ -26,6 +26,8 @@ services:
         sync: false
       - key: PP_PUBLISH_TOKEN     # CI's token for PUT /pp/releases/...
         sync: false
+      - key: PP_READ_TOKEN        # Claude's token for GET /pp/wishes/... and /pp/logs/...
+        sync: false
       - key: RESTIC_REPOSITORY    # s3:https://s3.<region>.backblazeb2.com/<bucket>
         sync: false
       - key: RESTIC_PASSWORD      # backup encryption; lose it and the backups are noise
