@@ -1,7 +1,7 @@
 # Emulator image: stock Paper Pure (tatsu) rootfs + the rmemu shim and fake hardware tree.
 ARG ROOTFS=pp-emu-rootfs:3.27.2.2
 
-FROM --platform=linux/arm64 ubuntu:24.04 AS build
+FROM ubuntu:24.04 AS build
 RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
     gcc libc6-dev libdrm-dev libp11-kit-dev libssl-dev zlib1g-dev >/dev/null
 COPY shim/ /src/shim/

@@ -167,7 +167,7 @@ function getFirmware(version) {
 
 function buildImage(version) {
   console.log(`building ${IMAGE}:${version}...`);
-  if (docker(['build', '-q', '--build-arg', `ROOTFS=${ROOTFS}:${version}`, '-t', `${IMAGE}:${version}`, '-f', path.join(root, 'docker/Dockerfile'), root]).status)
+  if (docker(['build', '-q', '--platform', 'linux/arm64', '--build-arg', `ROOTFS=${ROOTFS}:${version}`, '-t', `${IMAGE}:${version}`, '-f', path.join(root, 'docker/Dockerfile'), root]).status)
     die('image build failed');
 }
 
