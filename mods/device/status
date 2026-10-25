@@ -1,0 +1,21 @@
+#!/bin/bash
+# What mod stack is live: build info, whether xochitl runs with xovi, which
+# extensions it mapped, and the hashtab's state. Read-only.
+xovi=/home/root/xovi
+echo "os: $(sed -n 's/^IMG_VERSION=//p' /etc/os-release | tr -d '"')"
+head -n 2 "$xovi/BUILDINFO" 2>/dev/null
+pid=$(pidof xochitl) || { echo "xochitl: not running"; exit 1; }
+pid=${pid%% *}
+if grep -q "$xovi/xovi.so" "/proc/$pid/maps"; then
+    echo "xochitl $pid: xovi ON"
+    grep -o "$xovi/[^ ]*\.so" "/proc/$pid/maps" | sort -u | sed 's/^/  mapped /'
+else
+    echo "xochitl $pid: stock (no xovi)"
+fi
+k=$xovi/exthome/qt-resource-rebuilder/hashtab.key
+if [ -s "${k%.key}" ]; then
+    want="xochitl $(sha256sum /usr/bin/xochitl | cut -d' ' -f1) qrr $(sha256sum "$xovi/extensions.d/qt-resource-rebuilder.so" | cut -d' ' -f1)"
+    [ "$(cat "$k" 2>/dev/null)" = "$want" ] && echo "hashtab: ok" || echo "hashtab: STALE (run $xovi/paper-pure/hashtab)"
+else
+    echo "hashtab: missing (run $xovi/paper-pure/hashtab)"
+fi

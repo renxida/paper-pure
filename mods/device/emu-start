@@ -1,0 +1,28 @@
+#!/bin/bash
+# EMULATOR ONLY. The emulator has no systemd: its systemctl is a stub and a
+# shell loop runs xochitl, so the drop-in that xovi/start writes
+# (/etc/systemd/system/xochitl.service.d/*.conf, Environment=LD_PRELOAD=...)
+# never reaches xochitl. This does by hand what systemd would: stop the
+# supervised stock xochitl and start one with the drop-in's environment.
+# `ppemu restart` (or `systemctl restart xochitl`) brings stock back, like a
+# reboot does on the tablet.
+set -euo pipefail
+[ -d /opt/rmemu ] || { echo "emu-start: not the emulator, use xovi/start" >&2; exit 1; }
+dropin=/etc/systemd/system/xochitl.service.d
+shopt -s nullglob
+confs=("$dropin"/*.conf)
+[ ${#confs[@]} -gt 0 ] || { echo "emu-start: no drop-in in $dropin, run xovi/start first" >&2; exit 1; }
+
+# The environment the supervisor gives xochitl, plus the drop-in's.
+if pid=$(pidof xochitl); then
+    mapfile -d '' base < "/proc/${pid%% *}/environ"
+else
+    mapfile -d '' base < /proc/1/environ; base+=(LANG=C.UTF-8)
+fi
+mapfile -t extra < <(sed -n 's/^Environment="\(.*\)"$/\1/p' "${confs[@]}")
+
+systemctl stop xochitl
+while pidof xochitl >/dev/null; do sleep 0.5; done
+# Log to the container's stdout so `ppemu logs` shows it.
+env -i "${base[@]}" "${extra[@]}" setsid /usr/bin/xochitl --system </dev/null >>/proc/1/fd/1 2>&1 &
+echo "emu-start: xochitl $! started with: ${extra[*]}"

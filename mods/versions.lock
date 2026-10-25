@@ -1,0 +1,12 @@
+# Upstream sources for the mod stack, pinned to exact commits.
+# Format: name  git-url  commit  # tag, why
+# mods/build.sh fetches each one, checks the commit hash, and builds from it.
+# Change a pin only together with an emulator run on the OS we freeze on.
+#
+# Chosen for OS 3.27.2.2 (tatsu): AppLoad's QML hooks are OS-specific.
+# AppLoad v0.6.0 and master target 3.28/3.29 (its sidebar hook moved in
+# 40506d4 "support for 3.28"); v0.5.3 is the last release before that.
+xovi                 https://github.com/asivery/xovi                0c8d5269b55c851901d4e4a754dc2d7deab40b17  # v0.3.3 (2026-03-28)
+rm-xovi-extensions   https://github.com/asivery/rm-xovi-extensions  7874154dba6793cc68a15fae0fb9dd272c4ed20a  # v19-23052026 (qt-resource-rebuilder 0.3.0, xovi-setup scripts)
+qmldiff              https://github.com/asivery/qmldiff             25681c3cc7addb93fdbb41ceac1f1bdce8b2625d  # submodule of rm-xovi-extensions at v19
+rm-appload           https://github.com/asivery/rm-appload          5bb34a362f09f753f18bd6261558f8e2737aacdb  # v0.5.3 (2026-05-21), last before 3.28 hooks

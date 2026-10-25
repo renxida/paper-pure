@@ -1,0 +1,8 @@
+{
+    "id": "paper-pure-hello",
+    "name": "Hello",
+    "entry": "/ui/main.qml",
+    "loadsBackend": false,
+    "supportsScaling": true,
+    "canHaveMultipleFrontends": false
+}

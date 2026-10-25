@@ -1,0 +1,6 @@
+<RCC>
+    <qresource>
+        <file>ui/main.qml</file>
+        <file>ui/release.js</file>
+    </qresource>
+</RCC>
