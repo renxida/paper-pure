@@ -157,7 +157,19 @@ check "fresh SSH connection works after install" grep -q 'PASS    fresh SSH conn
 check "/ is read-only again" dev 'awk '\''$2=="/"{o=$4} END{exit !(o ~ /^ro/)}'\'' /proc/mounts'
 check "no bind mount left behind" dev '! grep -q /run/pp-device/root /proc/mounts'
 check "the /etc/dropbear host-key mount is still there" dev 'grep -q " /etc/dropbear " /proc/mounts'
-check "device.cloud.remarkable.com resolves to 0.0.0.0" dev 'wget -T 2 -O /dev/null http://device.cloud.remarkable.com:9/ 2>&1 | grep -q "(0.0.0.0:9)"'
+# nsswitch tries systemd-resolved first. Where it runs (the tablet; the test
+# bed on a native arm64 host) it answers our 0.0.0.0 line with no address;
+# where it can't start (the test bed under qemu) glibc reads /etc/hosts and
+# gets 0.0.0.0. Either way the name comes from our block: with no hosts line
+# resolved would ask DNS, which fails differently.
+check "device.cloud.remarkable.com resolves to 0.0.0.0 or to no address" dev '
+    n=device.cloud.remarkable.com
+    if wget -T 2 -O /dev/null "http://$n:9/" 2>&1 | grep -q -e "(0.0.0.0:9)" -e "remote host (0.0.0.0)"; then
+        echo "  $n: 0.0.0.0 (/etc/hosts)"; exit 0; fi
+    for t in A AAAA; do
+        out=$(resolvectl query -t $t $n 2>&1); echo "  resolvectl $t: $out"
+        case $out in *"does not have any RR of the requested type"*) ;; *) exit 1 ;; esac
+    done'
 check "stock hosts lines kept" dev 'grep -q "^127.0.0.1.*localhost" /etc/hosts'
 
 t "3. install again: nothing to change"

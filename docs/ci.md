@@ -34,10 +34,11 @@ The host needs docker (with arm64 binfmt on x86), go, node 22, python3, shellche
 
 ## Root here, `runner` there
 
-The dev container runs everything as root. GitHub's runners run as user `runner` (passwordless sudo, in the `docker` group), on cgroup v2 with AppArmor on. Our test containers run as root, like the tablet. The first GitHub runs hit three things that root never sees:
+The dev container runs everything as root. GitHub's runners run as user `runner` (passwordless sudo, in the `docker` group), on cgroup v2 with AppArmor on. Our test containers run as root, like the tablet. The first GitHub runs hit things that root, or qemu, never shows:
 
 - **Files a container writes into a bind mount belong to root.** The host user can't delete them (agent integration failed in its cleanup after 61 passed checks), or read them when the directory is 0700 (pp-proxy's `proxy/ca.crt` in the server proof). Read such files with `docker exec`. Before removing a work dir, hand it back with `docker exec ... chown -hR "$(id -u):$(id -g)"`. Cleanup never fails a run that passed.
 - **systemd as PID 1 needs AppArmor off and the host cgroup namespace.** Docker's `docker-default` AppArmor profile denies `mount` even with `SYS_ADMIN`, which most likely killed the device test bed's `boot.sh` at its first mount on GitHub (its log never left the runner; this host has no AppArmor). On cgroup v2, docker's default private cgroup namespace plus the rw `/sys/fs/cgroup` bind shows systemd the host's root cgroup: it moves itself out of the container, and journald fails. The test bed now runs like the emulator does: `--security-opt apparmor=unconfined --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw`.
+- **Native arm64 is not qemu.** On the runner, systemd-resolved starts inside the test bed (under qemu it can't) and answers our `0.0.0.0` hosts lines with "no address", as on the tablet. The test bed's resolve check accepts both answers; `pp-device.sh verify` already did.
 - **Unbounded waits hang.** When the test bed died, `run.sh` waited for it forever (57 min, until GitHub cancelled the job). Every wait now has a bound and prints the container's console when it gives up.
 
 To check a change the way CI runs it, use a non-root user in the `docker` group with its own copy of the repo, for example `sudo -u runner -H make -C ~runner/paper-pure proofs`.

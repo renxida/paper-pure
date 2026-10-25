@@ -3,7 +3,7 @@
 Rung 2 for everything at once. The emulator gets exactly what the tablet gets, through the same scripts, and talks to a local copy of the server. Then one script checks the things that matter: the OS stays frozen, notes sync both ways, releases arrive signed and roll back when broken, the kill switches work, and the tablet reports what it runs.
 
 ```bash
-test/e2e/run.sh                 # build, reset the emulator, run every step, clean up (~45 min here under qemu)
+test/e2e/run.sh                 # build, reset the emulator, run every step, clean up (~25 min here under qemu)
 test/e2e/run.sh --skip-build    # reuse images and mods/out
 test/e2e/run.sh --keep          # leave the server, gate and emulator up at the end, to poke at
 PP_BUILD_CA=/root/.ccr/ca-bundle.crt test/e2e/run.sh   # behind a TLS-intercepting proxy
@@ -11,7 +11,7 @@ PP_BUILD_CA=/root/.ccr/ca-bundle.crt test/e2e/run.sh   # behind a TLS-intercepti
 
 It prints one line per step (`PASS`, `FAIL` with the reason and the log, or `SKIP` after a failed setup step) and exits 0 only if every step passed. Logs, screenshots and work files go to `${PP_E2E_OUT:-test/e2e/out}` (gitignored). It starts with `ppemu reset`, so it wipes the emulator's notebooks.
 
-Needs: Docker with arm64 (qemu-user binfmt on x86), Node 20+, Go, python3, `ssh`, `curl`, `openssl`, the firmware (`emu/bin/ppemu setup` fetches it), and Qt's `rcc` on the host or the rung-1 image `pp-mods-host` (`apps/hello/test.sh` builds it).
+Needs: Docker with arm64 (qemu-user binfmt on x86), Node 20+, Go, python3, `ssh`, `curl`, `openssl`, the firmware (`emu/bin/ppemu setup` fetches it). Hello is rebuilt per release id with Qt's `rcc`: the host's if it has one, else the Qt stage of `mods/build/Dockerfile` (cached by `mods/build.sh`), loaded as `pp-e2e-qt`. Ports: `PP_E2E_PORT` (3180) and the next one.
 
 ## What runs where
 
@@ -50,6 +50,47 @@ Each step runs under a time limit (`timeout`, whole process group); see `STEPS` 
 - **PDFs crashed xochitl.** Once the PDF from the server had synced down, xochitl segfaulted in the shim every time it rendered the page (5 times in 15 minutes, then the stock start limit rebooted the "tablet", and every boot after that crash-looped the same way). The shim took the PDF page's pdfium bitmap, wrapped as a full-screen QImage, for the screen, then read it after it was freed. Screenshots went blank first. Fixed in `emu/shim/fb.c`: only a full-screen image with no cleanup function, in xochitl itself, is the screen.
 - On the way, `device/tablet/pp-device.sh --verify` learned that systemd-resolved answers a `0.0.0.0` hosts line with "no address" (see `device/README.md`).
 
+## What 3.27.2.2 does with rmfakecloud
+
+The riskiest piece, so in detail. rmfakecloud is the server image's pinned commit `3c6de006`, unmodified; upstream tests it only to 3.27.1. Everything below went through pp-proxy on the device and the fake Access gate, all 2xx, nothing to a name outside pp-proxy's list (`pp-proxy refused nothing`, and the DNS monitor saw only `internal.cloud.remarkable.com`, `local.appspot.com`, `eu.tectonic.remarkable.com`, `ping.remarkable.com`).
+
+| Works | How it looked |
+| --- | --- |
+| Pairing from the stock UI | 8-letter code from `/ui/api/newcode`; `GET /discovery/v1/endpoints` (internal.cloud), `POST /token/json/2/device/new` and `/user/new` (local.appspot.com, from discovery); Account page then says "cedar@example.invalid (via https://local.appspot.com)" |
+| Upload | `GET /sync/v4/root`, `PUT /sync/v3/files/<sha256>`, `PUT /sync/v3/root` on eu.tectonic, 6 to 20 s after closing the notebook. rm-sync runs schema `hashOfHashesV3`. The page's `.rm` is in rmfakecloud byte for byte, and `tools/wishes` renders it from there with the strokes where they were drawn |
+| Download | A PDF uploaded in the web UI is on the device 1 to 3 s later: the `/notifications/ws/json/1` websocket tells rm-sync, which GETs the root and files |
+| After a reboot | Still paired, pp-proxy back from the persisted unit, a new server document arrives |
+| Side traffic | `/integrations/v2/instances`, `/report/v1`, `/sync/reports/v1` (first one: `syncinfo:MissingTreeFile`, "Previous tree does not exist", expected on a first sync), `/analytics/v2/events` on ping.remarkable.com (rmfakecloud swallows them) |
+
+Nothing broke on the rmfakecloud side, so no patch. Two oddities, both from the emulator: the device registers as `fallback-<hash>` (no devconfig serial here; the tablet has one), and a fresh notebook sometimes starts on highlighter yellow (the script picks Black). Not covered: conflicts (both sides editing one page), deletes, folders, big files, screenshare, handwriting conversion, and real Cloudflare in front.
+
 ## Status
 
-Not run yet in full; see below as it fills in.
+**All 11 steps pass** from `ppemu reset`, Oct 25 2026, this x86_64 dev container (4 vCPU, arm64 under qemu-user), `PP_BUILD_CA=/root/.ccr/ca-bundle.crt test/e2e/run.sh --skip-build`, exit 0, 24 min:
+
+```
+PASS  build         4s      PASS  ota         495s
+PASS  emulator    202s      PASS  killswitch  190s
+PASS  server        9s      PASS  reboot      204s
+PASS  install      82s      PASS  disable      48s
+PASS  freeze       71s      PASS  status        5s
+PASS  sync        127s
+```
+
+The same run without `--skip-build` passed `build` in 37 s with everything cached (a cold `mods/build.sh` is ~30 min under qemu, see `mods/README.md`). From that run:
+
+- **OTA.** `e2e-…-good` installed in 178 s (`pp-agent.service`, default gates, through the gate; first hashtab build included), Hello showed `release e2e-…-good` (`shots/ota-hello/3-hello.png`). Broken: `rolled back ... xochitl (pid 5984) has not loaded "appload.so"`, 240 s, mods back on. Forged: `latest.json rejected: bad signature`, nothing downloaded. Tampered: `sha256 mismatch ... (deleted)`, nothing unpacked. Wrong OS: `refused: tested on OS [3.27.3.0], this tablet runs "3.27.2.2"`. Each refusal took 3 s.
+- **Kill switches.** Triple-press: `tripletap: mods off (…)`, then `tripletap: mods on (…)` after the health check (2 min 15 s). Reboot: `activate_on_boot is off`, stock, release still installed. With `paper-pure/disable`: `tripletap: mods already off`, `pp-agent.service` `ConditionResult=no`.
+- **Freeze.** `--verify` all PASS before and after the reboot; update-engine never active; the Updates switch reads off, switching it on logs `UnitMasked` (the switch then shows on until xochitl restarts; after the reboot it reads off). 0 journal lines and 0 DNS lookups naming an update host over the whole run (22 lookups in all, to 4 sync names).
+- **Status.** 10 reports in ppd, read through the gate (403 without the token): installed, rolled back, signature, sha256, wrong OS, the toggles, boot.
+- **No xochitl crash** in the whole run (0 `status=11/SEGV`; 12 screen captures, one per xochitl start), with a PDF on the device.
+- Logs and screenshots of this run are in the lane's scratch (`work-pp-e2e/run4-out`), not in the repo. Afterwards: no `pp-e2e-*` container or volume, no gate process, emulator reset.
+
+Earlier runs, and what they caught (all fixed): the PDF crash and the Wi-Fi gap above; a stale throwaway key from the previous run (`keys-forged`, now removed first); the runner dying when a failed step logged no `FAIL` line; checks that took the agent's early `live` marker for a finished health check (now they wait for `last_result`); a tamper test that appended a byte, which the agent never reads (it stops at the signed `size`; now a byte in the middle is flipped). One run failed at `reboot` because the host's `docker0` bridge vanished mid-run (`adding interface ... to bridge docker0 failed: Device does not exist`), not by our doing; recreated by hand.
+
+Not verified:
+
+- An arm64 host (CI's `ubuntu-24.04-arm`): never run there. The no-host-`rcc` path (Qt stage of `mods/build/Dockerfile`, loaded as `pp-e2e-qt`) was checked by hand only.
+- The cold path: `build` from an empty Docker cache and no `emu/firmware`.
+- Real Cloudflare Access, real Wi-Fi, the real tablet. The gate is `server/test/fakeaccess`; Wi-Fi is `rmemu-wifi`.
+- Sync beyond one page and one PDF each way (see above).
