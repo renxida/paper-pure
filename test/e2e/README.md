@@ -66,6 +66,19 @@ Nothing broke on the rmfakecloud side, so no patch. Two oddities, both from the 
 
 ## Status
 
+**Review fixes, Oct 25 2026 evening: all 11 steps pass**, `PP_BUILD_CA=/root/.ccr/ca-bundle.crt make rung2` (no `--skip-build`) in this x86_64 dev container, exit 0, 26.6 min, half of it next to the device test bed:
+
+```
+PASS  build        30s      PASS  ota         521s
+PASS  emulator    250s      PASS  killswitch  200s
+PASS  server       15s      PASS  reboot      200s
+PASS  install     110s      PASS  disable      45s
+PASS  freeze       85s      PASS  status        5s
+PASS  sync        130s
+```
+
+New in it: `pp-agent.timer stopped; no agent run in flight` before `ota`; the install's result read from state and the agent log; `30-appload.sh` ran at install, rollback, every recheck and the triple-press (1.3 to 1.7 s each, all ok), and the status said `install true` then `recheck true`; `--verify` passed `xochitl waits for nothing of ours` after install and after the reboot, and found the four extra reMarkable names blocked; the latest report carried pp-proxy's sync health (`errors` 0, a `last_ok`), and `/pp/problems` was `{"ok":true,"problems":[]}`. The heartbeat printed a `....` line a minute during the slow steps. The fail path (FAIL lines and log tail) was not triggered here. The no-`rcc` fallback for hello (CI's runners have `rcc`, so it never runs there) now runs its container as the calling user: as user `runner`, its output is owned by `runner` and `rm -rf` works; the old way left root-owned files that `runner` could not remove (`Permission denied`). Negative check for the new AppLoad check, by hand on the stock emulator: `never logged '[qmldiff]: Loaded external AppLoad hooks in main UI'`, exit 1.
+
 **All 11 steps pass** from `ppemu reset`, Oct 25 2026, this x86_64 dev container (4 vCPU, arm64 under qemu-user), `PP_BUILD_CA=/root/.ccr/ca-bundle.crt test/e2e/run.sh --skip-build`, exit 0, 24 min:
 
 ```

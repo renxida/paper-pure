@@ -155,6 +155,8 @@ Run on Oct 25 2026: x86_64 dev container, 4 vCPU, arm64 through qemu-user, emula
 
 ### Verified
 
+**Review fixes (Oct 25, evening).** `checks/30-appload.sh` in rung 2 (`make rung2`, all 11 steps pass): ok at install, rollback, every recheck and the triple-press, 1.3 to 1.7 s each. On the stock emulator (no mods) it fails: `never logged '[qmldiff]: Loaded external AppLoad hooks in main UI'`, exit 1. Its strings are qmldiff 25681c3's own (`src/lib.rs`) and rm-appload v0.5.3's, and a good run's journal has none of the failure lines.
+
 **Build**
 
 - `PP_BUILD_CA=/root/.ccr/ca-bundle.crt mods/build.sh` works from an empty cache. It took 28 min the first time (23 min of it Ubuntu's Qt apt layer under qemu), 8 min after a Dockerfile change, and 21 s fully cached.

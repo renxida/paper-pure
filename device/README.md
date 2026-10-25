@@ -79,6 +79,18 @@ Nothing here touches xochitl, its unit, the pen or display stack. We stop update
 
 ## Status
 
+### Review fixes (Oct 25, 2026, evening)
+
+`PP_NAME=pp-harden-tb PP_PORT=3194 device/test/run.sh`: **97 passed, 0 failed**, 45 minutes under qemu, half of it next to a rung 2 run, no container or volume left. New since the 84 of the second pass:
+
+- **10. A passcode.** `boot.sh` moves the `/home` volume aside; `home.mount` (a bind, `nofail` like the tablet's fstab) waits for a stand-in that runs the same `systemd-ask-password --accept-cached --keyname=userpin --id=homekey --timeout=0` homekey does. With every unit of ours installed: xochitl active 18 s after boot with `/home` locked, still the same boot at 100 s, the console never says its start job timed out; `pp-proxy`, `pp-agent-boot` and `pp-agent-tripletap` wait for `home.mount`. "Typing the passcode" (ending systemd-ask-password): `/home` mounts, SSH is back, pp-proxy runs, `pp-agent boot` runs after rm-sanity, `--verify` passes.
+  - The same stand-in with the old unit (`Before=xochitl`, from git) reproduces the review's finding: xochitl's job waits, then `xochitl.service: Job xochitl.service/start timed out`, `Rebooting.` after 77 s. With the new unit, xochitl is up at 22 s and stays (`scratch work-harden/pc/run.sh`, both variants).
+  - `verify` now fails if any `pp-*` unit is in xochitl's ordering (`systemctl list-dependencies --after --all`). In the emulator: the old pp-proxy unit, enabled, shows up there; the new one doesn't. It passes in every verify of this run and of rung 2.
+- **7. Reinstall over a crash-looping memfaultd.** `boot.sh` makes memfaultd restart every second with no start limit (`$STATE/memfaultd-loop`). It restarted 66 times, then 69 ten seconds later; `install` exited 0, the test bed stayed up, and memfaultd ended `inactive, masked` (stopped before masking). The old order (mask, reload, then stop; `git show 1f13ecc^`) leaves it `failed, masked` in 2 of 2 tries by hand; PID 1 survived those too, so the abort the CI lane saw is a race this does not force.
+- `pp-agent.service` (an install) now waits for rm-sanity too: its drop-in is persisted and checked by `verify` (scenario 6).
+- The four extra blocked names resolve to nowhere (`verify` in rung 2: `resolves to no address (systemd-resolved, A and AAAA): auth.remarkable.com`, and the other three).
+- `restore` refuses a path it never persisted. In a plain container: `pp-device.sh restore /etc/issue` gives `ERROR /etc/issue: not managed by pp-device`, exit 1, and the file is untouched (before: deleted, `CHANGE /etc/issue (stock)`). The test bed check for it was added after this run; `make proofs` runs it.
+
 ### Fixed by the e2e lane (Oct 25, 2026)
 
 `--verify` failed on the systemd emulator, and would on the tablet, with `device.cloud.remarkable.com resolves to '?', not 0.0.0.0` for all four blocked names. The tablet resolves through systemd-resolved (`hosts: resolve [!UNAVAIL=return] files` in `nsswitch.conf`), and resolved answers a `0.0.0.0` hosts line with "no address" (NODATA), not with `0.0.0.0`; the test bed has no resolved, so it never showed there. The check now also passes when `resolvectl query -t A` and `-t AAAA` both say `does not have any RR of the requested type`.

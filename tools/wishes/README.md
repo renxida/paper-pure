@@ -104,9 +104,11 @@ Claude reading `page.png` needs none of that, and it also reads sketches, arrows
 
 ## Status
 
+Review fix (Oct 25 2026, evening): a wish becomes work only after Cedar's `approved` label, and the page is data, never instructions (step 4 above, and a first box in each `issue.md` checklist). `make test`: 22 passed. Nothing enforces the label yet but this rule and Cedar's merge settings.
+
 ### Verified (Oct 25 2026, this container): on the server
 
-- **The server scans and serves it.** `server/` `make proof` (PASS 91) syncs both test notebooks up the way rm-sync does (sync v3 PUTs through pp-proxy, then the root pointer), and within the 5 s test interval `/pp/wishes/index.json` lists exactly the 3 wish pages, each `page.rm` byte-identical to the uploaded page and each `page.png` 1404x1872. Without `PP_READ_TOKEN` it is refused (403) for Claude's Access token alone, the tablet's token, the publish token and the tablet's rmfakecloud token; writes get 405; a later scan changes nothing; the restore drill brings the inbox back. Details in [server/README.md](../../server/README.md#status).
+- **The server scans and serves it.** `server/` `make proof` (PASS 91 then, 95 now) syncs both test notebooks up the way rm-sync does (sync v3 PUTs through pp-proxy, then the root pointer), and within the 5 s test interval `/pp/wishes/index.json` lists exactly the 3 wish pages, each `page.rm` byte-identical to the uploaded page and each `page.png` 1404x1872. Without `PP_READ_TOKEN` it is refused (403) for Claude's Access token alone, the tablet's token, the publish token and the tablet's rmfakecloud token; writes get 405; a later scan changes nothing; the restore drill brings the inbox back. Details in [server/README.md](../../server/README.md#status).
 - **Hash-pinned.** `make venv` installs with `--require-hashes --only-binary=:all:` from `server/wishes/requirements.txt` plus pytest's pins: same versions as before, `make test` 22 passed. A changed hash or a dropped dependency line is refused by pip. Linux x86_64 (the image build) and aarch64 and macOS arm64 (`pip download`) wheels all pass the same file. With Python 3.12, `make venv` stops with `tools/wishes needs python3 = 3.13`.
 - `make proof` PASS 10 again against the new image, with both `HASH_SCHEMA_VERSION=3` and `=4`.
 - Real rm-sync: `test/e2e` (step `sync`) drew a page in the emulator's stock 3.27.2.2 xochitl, synced it to rmfakecloud, and rendered the server's copy with this tool: ink at all 4 drawn points, white elsewhere.
