@@ -37,8 +37,9 @@ UPDATE_UNITS="swupdate.service swupdate.socket update-engine.service memfaultd.s
 # `rm-ssh-over-wlan on` can't turn it on.
 SSH_UNITS="dropbear-wlan.socket"
 AGENT_UNITS="pp-agent-boot.service pp-agent.service pp-agent.timer pp-agent-tripletap.service"
-# Units that turn mods on, so they wait for rm-sanity (wait-sanity.conf).
-WAIT_UNITS="pp-agent-boot.service pp-agent-tripletap.service"
+# Units that can turn mods on (boot, triple-press, install), so they wait
+# for rm-sanity (wait-sanity.conf).
+WAIT_UNITS="pp-agent-boot.service pp-agent-tripletap.service pp-agent.service"
 
 FAILS=0
 say()  { printf '%-7s %s\n' "$1" "$2"; }
@@ -163,6 +164,9 @@ persist_path() { # copy live state of one path into the real root fs
 }
 restore_path() { # put one path back to stock in both views
     local p=$1 v d
+    # Only what we changed: a path we never backed up has no stock copy,
+    # and deleting it would delete a stock file.
+    grep -qxF -- "$p" "$MANAGED" 2>/dev/null || die "$p: not managed by pp-device (never changed, nothing to restore)"
     for v in $(views); do
         d="$v${p#/}"
         if [ -f "$STOCK$p" ] && [ ! -L "$STOCK$p" ] && [ -f "$d" ] && [ ! -L "$d" ]; then
@@ -359,6 +363,15 @@ cmd_verify() {
         u=$(systemctl is-enabled update-engine.service 2>/dev/null || true)
         if [ "$u" = masked ]; then pass "setting: Updates switch is off for good (update-engine.service is $u)"
         else fail "setting: update-engine.service is '$u', so the Updates switch can turn on"; fi
+    fi
+    # Nothing of ours may make xochitl wait: with a passcode set, /home
+    # unlocks only once the passcode is typed into xochitl, and every unit of
+    # ours needs /home. xochitl waiting past its 60 s JobTimeoutSec means
+    # OnFailure=emergency.target, a reboot, every boot (device/README.md).
+    if have_systemd; then
+        n=$(systemctl list-dependencies --after --all --plain --no-legend xochitl.service 2>/dev/null | awk '$1 ~ /^pp-/ { print $1 }' | sort -u | tr '\n' ' ')
+        if [ -z "$n" ]; then pass "xochitl waits for nothing of ours (it must start before /home unlocks)"
+        else fail "xochitl is ordered after ${n% }: with a passcode set it would never start"; fi
     fi
     # Freeze, by network block.
     check_hosts_block "paper-pure freeze" "$HERE/freeze.hosts"

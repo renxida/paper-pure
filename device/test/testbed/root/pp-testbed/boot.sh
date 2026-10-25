@@ -77,9 +77,50 @@ done
 # seconds, so it never hits its start limit and restarts forever, and
 # install's mask + daemon-reload landing on a pending restart crashed
 # systemd 255 ("Code should not be reached ... service_enter_start()",
-# PID 1 aborts). One try is enough to see it start.
+# PID 1 aborts; pp-device.sh now stops units before masking them). One try
+# is enough to see it start. With $STATE/memfaultd-loop it crash-loops on
+# purpose, as fast as it can, so install has to cope with that.
 mkdir -p /run/systemd/system/memfaultd.service.d
-printf '[Service]\nRestart=no\n' > /run/systemd/system/memfaultd.service.d/zz-pptest.conf
+if [ -e $STATE/memfaultd-loop ]; then
+    printf '[Unit]\nStartLimitIntervalSec=0\n[Service]\nRestart=always\nRestartSec=1\n' > /run/systemd/system/memfaultd.service.d/zz-pptest.conf
+else
+    printf '[Service]\nRestart=no\n' > /run/systemd/system/memfaultd.service.d/zz-pptest.conf
+fi
+
+# With $STATE/passcode: /home is locked until a passcode is typed into
+# xochitl, as on a tablet with a passcode set. On the tablet homecryptor ->
+# homekey waits in systemd-ask-password (--timeout=0) and xochitl's pincode
+# module answers it; fstab mounts /home nofail with no device timeout. Here
+# the docker volume moves aside, a stand-in asks the same way, and home.mount
+# (a bind, nofail like fstab's) waits for it. "Typing the passcode" is killing
+# that systemd-ask-password. SSH needs /home (host key, authorized_keys), so
+# until then only docker exec gets in.
+if [ -e $STATE/passcode ]; then
+    mkdir -p /run/pp-home
+    mount --move /home /run/pp-home
+    cat > /run/systemd/system/pp-testbed-passcode.service <<'UNIT'
+[Unit]
+Description=test bed: homekey waiting for the passcode (systemd-ask-password --timeout=0)
+DefaultDependencies=no
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutSec=0
+ExecStart=/bin/sh -c 'systemd-ask-password --accept-cached --keyname=userpin --id=homekey --timeout=0 Passcode > /dev/null; exit 0'
+UNIT
+    cat > /run/systemd/system/home.mount <<'UNIT'
+[Unit]
+Requires=pp-testbed-passcode.service
+After=pp-testbed-passcode.service
+[Mount]
+What=/run/pp-home
+Where=/home
+Type=none
+Options=bind,nofail
+UNIT
+    mkdir -p /run/systemd/system/local-fs.target.wants
+    ln -sf ../home.mount /run/systemd/system/local-fs.target.wants/home.mount
+fi
 
 # xochitl needs the e-ink panel. Keep the stock unit and the stock drop-in's
 # settings (RestartMode=direct, OnFailure=emergency.target, start limit),

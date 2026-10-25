@@ -12,4 +12,11 @@
 # Where the public .swu images live. Not referenced on the tablet; blocked in
 # case an update server ever hands out its URLs.
 0.0.0.0 remarkable-software.s3.us-east-2.amazonaws.com
+# reMarkable's cloud is unused (desiderata row 5). Sync goes through pp-proxy;
+# these other names in xochitl, rm-sync and user-authenticator-cli (accounts,
+# error reports, the store, the website) go nowhere.
+0.0.0.0 auth.remarkable.com
+0.0.0.0 errors.cloud.remarkable.com
+0.0.0.0 retail.cloud.remarkable.com
+0.0.0.0 www.remarkable.com
 # paper-pure freeze end

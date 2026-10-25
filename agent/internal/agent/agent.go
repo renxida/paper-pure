@@ -293,7 +293,7 @@ func (a *Agent) rollback(ctx context.Context, bad, why string, reactivate bool) 
 	msg := "rolled back to " + orStock(good) + ": " + why
 	if reactivate && good != "" && !a.st.GuardTripped && !a.disabled() {
 		m, err := a.loadManifest(good)
-		if false {
+		if err == nil && !m.SupportsOS(a.osVersion) {
 			msg += fmt.Sprintf("; %s not turned on: OS is %q, it was tested on %v", good, a.osVersion, m.OSVersions)
 		} else if err == nil {
 			err = a.activate(ctx, good, "rollback", m)
