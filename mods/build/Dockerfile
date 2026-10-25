@@ -49,9 +49,12 @@ RUN cmake -S /src/xovi -B /build/xovi -DCMAKE_BUILD_TYPE=Release >/dev/null && \
 
 # qt-resource-rebuilder (its Makefile expects a Yocto SDK environment; these
 # variables stand in for it). libqmldiff.a is already in place.
+# -U_FORTIFY_SOURCE: Ubuntu's gcc fortifies by default, and src/main.c calls
+# open(fname, O_RDWR | O_CREAT) without a mode, which fortify rejects. The
+# Yocto SDK upstream uses doesn't fortify; neither do we, for this one.
 RUN cd /src/rm-xovi-extensions/qt-resource-rebuilder && \
     make OECORE_TARGET_ARCH=aarch64 SDKTARGETSYSROOT=/ CFLAGS=-O2 \
-         CC="gcc -D_GNU_SOURCE -fPIC" \
+         CC="gcc -D_GNU_SOURCE -fPIC -U_FORTIFY_SOURCE" \
          CXX="g++ -O2 -fPIC -I/usr/include/aarch64-linux-gnu/qt6 -I/usr/include/aarch64-linux-gnu/qt6/QtCore" >/dev/null
 
 # AppLoad (xovi extension build). make.sh uses qmake6 and rcc from PATH.
@@ -90,4 +93,4 @@ RUN set -e; x=/out/tree/xovi; \
     for f in $x/xovi.so $x/extensions.d/*.so; do echo "== $(basename $f)"; readelf -V -d -W "$f"; done > /out/elf-info.txt
 
 FROM scratch
-COPY --from=build /out/ /
+COPY --from=build /out/xovi-tatsu.tar.gz /out/BUILDINFO /out/elf-info.txt /

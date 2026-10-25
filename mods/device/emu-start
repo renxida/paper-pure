@@ -21,7 +21,7 @@ else
 fi
 mapfile -t extra < <(sed -n 's/^Environment="\(.*\)"$/\1/p' "${confs[@]}")
 
-systemctl stop xochitl
+systemctl stop xochitl || true   # the stub fails when xochitl is between restarts
 while pidof xochitl >/dev/null; do sleep 0.5; done
 # Log to the container's stdout so `ppemu logs` shows it.
 env -i "${base[@]}" "${extra[@]}" setsid /usr/bin/xochitl --system </dev/null >>/proc/1/fd/1 2>&1 &
