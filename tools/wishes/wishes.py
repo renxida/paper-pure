@@ -12,7 +12,8 @@ A wish is any written page that is either
 
 scan writes one folder per new or changed page (page.png, page.svg, page.rm,
 wish.json, issue.md), prints each folder's path, and remembers what it saw in
-DIR/.wishes-state.json so the next run only emits what changed.
+DIR/index.json (key -> folder, revision, sha256) so the next run only
+emits what changed. index.json is also what a reader fetches first.
 """
 from __future__ import annotations
 
@@ -30,7 +31,7 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-STATE_FILE = ".wishes-state.json"
+STATE_FILE = "index.json"  # what was picked up: also the list a reader (Claude, ppd) fetches first
 PAGE_W, PAGE_H = 1404, 1872  # Paper Pure and rM2 page, in .rm units (1 unit = 1 screen px)
 
 
@@ -90,28 +91,39 @@ def _parse_index(b: bytes) -> list[tuple[str, str, str]]:
     return out
 
 
+def _tree_hash(index: bytes) -> str:
+    """An index blob is named by sha256 over its entries' binary hashes, sorted
+    by entry name (rmfakecloud models.HashEntries), not by its own bytes."""
+    try:
+        entries = sorted(_parse_index(index), key=lambda e: e[2])
+        return hashlib.sha256(b"".join(bytes.fromhex(h) for h, _t, _n in entries)).hexdigest()
+    except ValueError:
+        return ""
+
+
 def rmfakecloud_docs(datadir: Path, user: str | None = None) -> list[Doc]:
     """rmfakecloud's DATADIR: users/<uid>/sync/ holds content-addressed blobs.
 
     sync/root names the root index; the root index lists one index per
-    document; a document index lists its files (metadata, content, pages)."""
+    document; a document index lists its files (metadata, content, pages).
+    Every blob is checked against its name, so a half-written one fails the run."""
     docs = []
     for udir in sorted((datadir / "users").glob("*")):
         sync = udir / "sync"
         if (user and udir.name != user) or not (sync / "root").is_file():
             continue
 
-        def blob(h: str, sync: Path = sync) -> bytes:
+        def blob(h: str, index: bool = False, sync: Path = sync) -> bytes:
             b = (sync / h).read_bytes()
-            if hashlib.sha256(b).hexdigest() != h:  # half-written, or not ours
-                raise ValueError(f"blob {h} does not match its hash")
-            return b
+            if hashlib.sha256(b).hexdigest() == h or (index and _tree_hash(b) == h):
+                return b
+            raise ValueError(f"blob {h} does not match its hash")  # half-written, or not ours
 
         root = (sync / "root").read_text().strip()
-        for h, typ, did in _parse_index(blob(root)):
+        for h, typ, did in _parse_index(blob(root, True)):
             if typ != "80000000":
                 continue
-            entries = {name: fh for fh, _t, name in _parse_index(blob(h))}
+            entries = {name: fh for fh, _t, name in _parse_index(blob(h, True))}
             meta_h, content_h = entries.get(f"{did}.metadata"), entries.get(f"{did}.content")
             files = {n: (lambda fh=fh: blob(fh)) for n, fh in entries.items() if n.endswith(".rm")}
             docs.append(Doc(did, _json(blob(meta_h)) if meta_h else {},
@@ -272,14 +284,17 @@ def _canvas(page: Page) -> tuple[float, float, float, float]:
     return x0, y0, x1 - x0, y1 - y0
 
 
-def to_png(page: Page, ss: int = 2) -> bytes:
+def to_png(page: Page) -> bytes:
     from PIL import Image, ImageDraw, ImageFont
 
     x0, y0, w, h = _canvas(page)
+    ss = 2 if h < 4000 else 1  # draw at 2x and shrink, for smooth lines; not for very long pages
     img = Image.new("RGB", (int(w * ss), int(h * ss)), "white")
-    for tool, rgb, alpha, width, pts in page.strokes:
-        layer = img if alpha == 255 else Image.new("RGBA", img.size, (0, 0, 0, 0))
-        d = ImageDraw.Draw(layer)
+    glaze = None  # one translucent layer for highlighter and shader, laid on at the end
+    for _tool, rgb, alpha, width, pts in page.strokes:
+        if alpha < 255 and glaze is None:
+            glaze = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        d = ImageDraw.Draw(img if alpha == 255 else glaze)
         xy = [((x - x0) * ss, (y - y0) * ss) for x, y in pts]
         r = width * ss / 2
         fill = rgb if alpha == 255 else rgb + (alpha,)
@@ -287,8 +302,8 @@ def to_png(page: Page, ss: int = 2) -> bytes:
             d.line(xy, fill=fill, width=max(1, round(width * ss)), joint="curve")
         for x, y in (xy[0], xy[-1]):  # round caps
             d.ellipse((x - r, y - r, x + r, y + r), fill=fill)
-        if layer is not img:
-            img = Image.alpha_composite(img.convert("RGBA"), layer).convert("RGB")
+    if glaze is not None:
+        img = Image.alpha_composite(img.convert("RGBA"), glaze).convert("RGB")
     d = ImageDraw.Draw(img)
     for x, y, s, size in page.text:
         d.text(((x - x0) * ss, (y - y0 - 4) * ss), s, fill="black", anchor="ls",
@@ -340,7 +355,9 @@ From the tablet: "{w['notebook']}", page {w['page']} of {w['pages']} ({w['why']}
 Typed on the page:
 
 {typed}
-''' if typed else ''}
+''' if typed else ''}{f'''
+Note: {w['unreadable_blocks']} part(s) of this page are in a format rmscene can't read yet, so page.png may be missing something. Check rmscene for a newer release.
+''' if w['unreadable_blocks'] else ''}
 ## Done when
 
 - [ ] A failing test shows the wish isn't met yet
@@ -360,7 +377,7 @@ def scan(docs: list[Doc], inbox: Path, source: str, notebook: str = "Wishes", ta
     new, blank, same = [], 0, 0
     for doc, pid, why in select(docs, notebook, tag):
         rm = doc.read(f"{doc.id}/{pid}.rm")
-        if rm is None:  # xochitl writes no .rm for a page nobody wrote on
+        if rm is None:  # not saved yet. (A new empty page does get a ~424-byte .rm: see page.blank)
             blank += 1
             continue
         key, sha = f"{doc.id}/{pid}", hashlib.sha256(rm).hexdigest()
@@ -424,31 +441,31 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("png", type=Path)
     r.add_argument("--svg", type=Path)
     a = ap.parse_args(argv)
-
-    if a.cmd == "render":
-        page = parse_page(a.rm.read_bytes())
-        a.png.write_bytes(to_png(page))
-        if a.svg:
-            a.svg.write_text(to_svg(page))
-        print(f"{a.png}: {len(page.strokes)} strokes, {page.size[0]}x{page.size[1]}"
-              + (f", {page.unreadable} unreadable blocks" if page.unreadable else ""))
-        return 0
-
-    if a.rmfakecloud and not (a.rmfakecloud / "users").is_dir():
+    if a.cmd == "scan" and a.rmfakecloud and not (a.rmfakecloud / "users").is_dir():
         ap.error(f"{a.rmfakecloud} has no users/ folder; pass rmfakecloud's DATADIR")
-    if a.xochitl and not a.xochitl.is_dir():
+    if a.cmd == "scan" and a.xochitl and not a.xochitl.is_dir():
         ap.error(f"{a.xochitl} is not a folder")
     try:
+        if a.cmd == "render":
+            page = parse_page(a.rm.read_bytes())
+            a.png.write_bytes(to_png(page))
+            if a.svg:
+                a.svg.write_text(to_svg(page))
+            print(f"{a.png}: {len(page.strokes)} strokes, {page.size[0]}x{page.size[1]}"
+                  + (f", {page.unreadable} unreadable blocks" if page.unreadable else ""))
+            return 0
         if a.rmfakecloud:
             docs, source = rmfakecloud_docs(a.rmfakecloud, a.user), f"rmfakecloud {a.rmfakecloud}"
         else:
             docs, source = xochitl_docs(a.xochitl), f"xochitl {a.xochitl}"
         for p in scan(docs, a.inbox, source, a.notebook, a.tag):
             print(p, flush=True)
+        return 0
+    except ImportError as e:
+        print(f"wishes: {e}: run `make venv` in tools/wishes (or pip install -r requirements.txt)", file=sys.stderr)
     except (OSError, ValueError) as e:  # a blob mid-write, a format we don't know: retry next run
         print(f"wishes: error: {e}", file=sys.stderr)
-        return 1
-    return 0
+    return 1
 
 
 if __name__ == "__main__":
