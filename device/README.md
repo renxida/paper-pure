@@ -57,6 +57,7 @@ Not used: an `AutoUpdate` key exists in xochitl's settings code, but the Updates
 - **Nothing of ours before xochitl.** With a passcode set, `/home` unlocks only once the passcode is typed into xochitl, and every unit of ours lives on `/home`. A unit ordered `Before=xochitl` (pp-proxy had one) makes xochitl wait for `/home`; its 60 s `JobTimeoutSec` runs out, `OnFailure=emergency.target` reboots, every boot, and no UI ever appears to type the passcode into. Only the recovery tool gets out. `verify` fails if any `pp-*` unit is in xochitl's ordering (`systemctl list-dependencies --after`), and the test bed boots with a passcode stand-in (scenario 10). See `docs/firmware.md`.
 - **Kill switches, no cable needed.** Triple-press power toggles mods (`pp-agent-tripletap.service`, persisted here like the other agent units). Reboot is stock (`activate_on_boot` is false by default). A failing release rolls back by itself. Over SSH: `touch /home/root/paper-pure/disable`, and nothing turns mods on.
 - **Undo.** `--uninstall` restores every path in `managed.list` from `stock/`.
+- **Never half-way.** `install` checks everything it needs before it changes anything: model, OS, developer mode, no OS update staged or running (`swu_status` 0), its own files, and the agent's and proxy's units, CA and hosts. If any check fails, it prints `preflight failed; nothing changed`. Each `swu_status` value prints what it means and what to do. Then it stops the update services and reads `swu_status` again. An update that started in between stops it there, with the root fs untouched. It ignores SIGHUP and SIGPIPE and logs to `/home/root/paper-pure/device/install.log`, so an SSH session that drops (cable out, laptop asleep) doesn't stop it half-way. Before, it died of SIGPIPE at its next line of output; cut during the writes, that left one unit masked and no message. If it still stops mid-write (an I/O error), it prints `INCOMPLETE: ...`, and `/` goes back to read-only as on every exit. The freeze comes first and our units after it, and each change it made is safe on its own. Run install again to finish. It does not roll back: going back to stock is `--uninstall`.
 
 ## SSH is private
 
@@ -78,6 +79,43 @@ Nothing here touches xochitl, its unit, the pen or display stack. We stop update
 - **mods**: the triple-press is `pp-agent tripletap`, not xovi-tripletap (whose `enable.sh` does `umount -R /etc`).
 
 ## Status
+
+### CI: the test bed was online and got a real OS update (Oct 25, 2026, night)
+
+On GitHub's arm64 runners the test bed failed in 4 of 6 runs (13, 14, 16, 18). `install` exited 1 and nothing persisted. Run 18 printed why, because `run.sh` now shows a failed install's own lines and the test bed's update journal:
+
+- The install printed `FAIL swu_status=3` and `ERROR preflight failed; nothing changed`.
+- Just before that, the journal had:
+  - `fakeupdateengine_service: DOWNLOAD ... 161766400 ... "3.29.0.153"`
+  - `swupdate: RUN Installation in progress`
+  - `realpath: /dev/disk/by-partlabel/root_a: No such file or directory`
+  - `Installation failed !`
+
+What happened and what changed:
+
+- **Cause: a test bed artifact.** On the runner the test bed had a network. Stock memfaultd writes swupdate's server config (`https://device.cloud.remarkable.com/api/v0/hawkbit`) before it dies, and update-engine asks swupdate to check. reMarkable's production server offered 3.29.0.153 to the fresh random device id in some runs and not in others. Its install failed in the container (no eMMC) and left `swu_status=3`. Under qemu in the dev container the test bed has no DNS, so this never happened there.
+- **The product did the right thing.** `install` refused before touching anything: `/` stayed read-only, no bind was left, and no mask or hosts block was written. It was not a half-way install. A real tablet left online would refuse the same way, and rightly: with `swu_status=1` the next boot runs the new slot, which has no freeze.
+- **Test bed fix:** `--network none`, like the tablet in flight mode until it is frozen (runbook step 0). SSH goes in through `docker exec ... nc 127.0.0.1 22`. Step 1 checks that the test bed is offline and that preflight passes. CI no longer registers a new device with reMarkable or downloads 160 MB per run.
+- **Product fixes in `pp-device.sh`** (see Never brick, "Never half-way"):
+  - Each `swu_status` value says what it means and what to do.
+  - It reads `swu_status` again after stopping the update services.
+  - It outlives a dropped SSH session and logs to `device/install.log`.
+  - The agent's and proxy's inputs are checked in preflight.
+  - `real_open` marks itself open before the remount, so a failed bind can't leave `/` read-write.
+  - `device/install.sh` says so when the link drops (ssh exit 255).
+- **New scenarios:**
+  - 1b: `swu_status=3`. Install refuses, says what to do, and nothing changes live or in the root fs.
+  - 1c: a stand-in update is cut off when install stops swupdate and leaves 7. Install stops with the root fs untouched.
+  - 1d: a reboot, and the stock updater clears the flag.
+  - 7: the reinstall's output is cut after two lines. It still runs to the end, and its log says all checks passed.
+
+Results:
+
+- On GitHub, run 19 (`440bb5a`, the fix) passed end to end, as user `runner` on native arm64. The device test bed took 687 s.
+- In the dev container (root, qemu, cgroup v1), scenarios 1 to 7 and 9a to 9c gave 73 checks, 0 failed. A tool time limit cut that run off in 9c.
+- The mechanism of the dropped session, shown in a plain tatsu container (`pp-device.sh install | head -n 2`):
+  - The old script ends at its third line with `pipeline rc=141`.
+  - The new one runs to the end: 6 masks, the hosts block, 10 managed paths, and its log ends with the verdict.
 
 ### Review fixes (Oct 25, 2026, evening)
 

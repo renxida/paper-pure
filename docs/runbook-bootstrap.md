@@ -64,7 +64,15 @@ device/install.sh --verify root@10.11.99.1
 
 **human**: Settings > General > Software. **Updates** should be off. Try switching it on: it should stay off (or snap back). Tell Claude what you see.
 
-If verify FAILs on "next boot goes to ..." or "swu_status": an update is staged. Stop, and decide with Claude (the fix it prints touches the bootloader).
+If install or verify FAILs on "swu_status", an OS update got in (the tablet was online). Install then changes nothing, and the next line says what to do:
+
+- 3, a failed attempt: flight mode on, reboot (the stock updater clears the flag when it starts), run install again.
+- 1, installed and waiting for the next reboot: **don't reboot**. Stop, and decide with Claude.
+- 7, being installed right now: flight mode on, wait a minute, run install again.
+
+If verify FAILs on "next boot goes to ...": an update is staged. Stop, and decide with Claude (the fix it prints touches the bootloader).
+
+If the cable comes out or the laptop sleeps during install, it keeps going on the tablet (its log: `/home/root/paper-pure/device/install.log`). Run install again: it waits for that run, then finishes or confirms it.
 
 ## 5. The server (Cedar and Claude)
 
