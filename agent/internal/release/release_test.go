@@ -166,6 +166,22 @@ func TestPackRefusesEscapingSymlink(t *testing.T) {
 	if err := Pack(src, &bytes.Buffer{}, time.Now()); err == nil {
 		t.Fatal("absolute symlink packed")
 	}
+	// A chain: d/up -> .. is fine alone, escape -> d/up/.. is the tree's parent.
+	src = t.TempDir()
+	os.MkdirAll(filepath.Join(src, "d"), 0o755)
+	os.Symlink("..", filepath.Join(src, "d", "up"))
+	os.Symlink("d/up/..", filepath.Join(src, "escape"))
+	err := Pack(src, &bytes.Buffer{}, time.Now())
+	if err == nil || !strings.Contains(err.Error(), "leads out") {
+		t.Fatalf("chained escaping symlink packed: %v", err)
+	}
+	// In-tree chains are fine: a -> d/up/d (d/up is the root again).
+	os.Remove(filepath.Join(src, "escape"))
+	os.Symlink("d/up/d", filepath.Join(src, "a"))
+	os.Symlink("missing/../d", filepath.Join(src, "dangling"))
+	if err := Pack(src, &bytes.Buffer{}, time.Now()); err != nil {
+		t.Fatalf("in-tree chain refused: %v", err)
+	}
 }
 
 type ent struct {
@@ -207,6 +223,9 @@ func TestExtractRejectsEscapes(t *testing.T) {
 		"device":          {{name: "d", typ: tar.TypeChar}},
 		"link under link": {{name: "d", link: ".", typ: tar.TypeSymlink}, {name: "d/up", link: "..", typ: tar.TypeSymlink}},
 		"write via link":  {{name: "l", link: "sub", typ: tar.TypeSymlink}, {name: "l", typ: tar.TypeReg, body: "x"}},
+		// Each link stays inside on its own; together they lead out.
+		"chained links": {{name: "d/", typ: tar.TypeDir}, {name: "d/up", link: "..", typ: tar.TypeSymlink}, {name: "escape", link: "d/up/..", typ: tar.TypeSymlink}},
+		"chain via dir": {{name: "a/b/", typ: tar.TypeDir}, {name: "a/b/top", link: "../..", typ: tar.TypeSymlink}, {name: "x", link: "a/b/top/../etc", typ: tar.TypeSymlink}},
 	}
 	for name, ents := range cases {
 		dst := filepath.Join(t.TempDir(), "out")

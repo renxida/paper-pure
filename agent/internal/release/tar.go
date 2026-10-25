@@ -65,6 +65,9 @@ func Pack(srcDir string, w io.Writer, mtime time.Time) error {
 			if err := checkLink(rel, target); err != nil {
 				return err
 			}
+			if err := staysInside(srcDir, rel); err != nil {
+				return err
+			}
 			hdr.Typeflag, hdr.Linkname, hdr.Mode = tar.TypeSymlink, target, 0o777
 		default:
 			return fmt.Errorf("%s: only files, dirs and symlinks go in a release", rel)
@@ -196,6 +199,72 @@ func Extract(r io.Reader, dst string) error {
 		if err := os.Symlink(l.target, out); err != nil {
 			return err
 		}
+	}
+	// Each link alone stays inside (checkLink), but one can lead through
+	// another: d/up -> .., then x -> d/up/.. is the tree's parent.
+	for _, l := range links {
+		if err := staysInside(dst, l.name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// staysInside follows the symlink root/name, and every symlink it leads
+// through, one path element at a time, and fails if that ever climbs above
+// root. Only paths inside root are looked at. A name that doesn't exist
+// (a dangling link) ends the lookups; the rest is checked by name.
+func staysInside(root, name string) error {
+	dir := strings.Split(path.Dir(name), "/")
+	if dir[0] == "." {
+		dir = nil
+	}
+	target, err := os.Readlink(filepath.Join(root, filepath.FromSlash(name)))
+	if err != nil {
+		return err
+	}
+	todo := strings.Split(target, "/")
+	exists := true
+	for hops := 0; len(todo) > 0; {
+		c := todo[0]
+		todo = todo[1:]
+		switch c {
+		case "", ".":
+			continue
+		case "..":
+			if len(dir) == 0 {
+				return fmt.Errorf("symlink %s -> %s: leads out of the release", name, target)
+			}
+			dir = dir[:len(dir)-1]
+			continue
+		}
+		dir = append(dir, c)
+		if !exists {
+			continue
+		}
+		fi, err := os.Lstat(filepath.Join(append([]string{root}, dir...)...))
+		if errors.Is(err, fs.ErrNotExist) {
+			exists = false
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if fi.Mode()&fs.ModeSymlink == 0 {
+			continue
+		}
+		if hops++; hops > 40 {
+			return fmt.Errorf("symlink %s: too many links", name)
+		}
+		t, err := os.Readlink(filepath.Join(append([]string{root}, dir...)...))
+		if err != nil {
+			return err
+		}
+		if path.IsAbs(t) {
+			return fmt.Errorf("symlink %s leads through an absolute symlink", name)
+		}
+		dir = dir[:len(dir)-1]
+		todo = append(strings.Split(t, "/"), todo...)
 	}
 	return nil
 }

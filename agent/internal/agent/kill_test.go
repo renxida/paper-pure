@@ -198,10 +198,18 @@ func TestKillSwitchFileComposes(t *testing.T) {
 		t.Fatal("status does not say disabled")
 	}
 	os.Remove(filepath.Join(h.dir, "root/disable"))
+	// The triple-press that turned mods off still holds: no install yet.
 	if err := h.update(); err != nil {
 		t.Fatal(err)
 	}
-	eq(t, "r2 installs once the file is gone", h.current(), "releases/r2")
+	eq(t, "file gone, but mods were turned off by hand", h.current(), "releases/r1")
+	if err := h.toggle(); err != nil { // on
+		t.Fatal(err)
+	}
+	if err := h.update(); err != nil {
+		t.Fatal(err)
+	}
+	eq(t, "r2 installs once a triple-press turned mods on", h.current(), "releases/r2")
 }
 
 func TestInterruptedInstallLeftForNextRun(t *testing.T) {

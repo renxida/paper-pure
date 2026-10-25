@@ -31,8 +31,16 @@ type Status struct {
 	LastResult     string    `json:"last_result"`
 	LastError      string    `json:"last_error,omitempty"`
 	BatteryPercent int       `json:"battery_percent"`
-	Events         []Event   `json:"events"`
-	LogTail        string    `json:"log_tail"`
+	// ModsOff: a triple-press turned mods off; no install or boot turns
+	// them on until the next one.
+	ModsOff bool `json:"mods_off"`
+	// Checks: the last run of a release's checks (install, turn-on, boot,
+	// or the recheck each update run does while mods are live).
+	Checks *CheckResult `json:"checks,omitempty"`
+	// Sync: what pp-proxy says about stock sync (server/tablet-proxy).
+	Sync    json.RawMessage `json:"sync,omitempty"`
+	Events  []Event         `json:"events"`
+	LogTail string          `json:"log_tail"`
 }
 
 func (a *Agent) status() Status {
@@ -59,9 +67,21 @@ func (a *Agent) status() Status {
 		LastResult:     s.LastResult,
 		LastError:      s.LastError,
 		BatteryPercent: batteryPercent(a.cfg),
+		ModsOff:        s.ModsOff,
+		Checks:         s.Checks,
+		Sync:           a.syncStatus(),
 		Events:         s.Events,
 		LogTail:        a.logTail(4 << 10),
 	}
+}
+
+// syncStatus is pp-proxy's sync.json as it is, if it is valid JSON.
+func (a *Agent) syncStatus() json.RawMessage {
+	b, err := os.ReadFile(a.cfg.syncFile())
+	if err != nil || len(b) > 4<<10 || !json.Valid(b) {
+		return nil
+	}
+	return json.RawMessage(bytes.TrimSpace(b))
 }
 
 // report POSTs status. Failure is logged, never fatal.

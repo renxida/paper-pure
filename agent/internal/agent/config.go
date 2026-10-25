@@ -59,6 +59,9 @@ type Config struct {
 	PowerKeyDevice string `json:"power_key_device"`
 	SysClassInput  string `json:"sys_class_input"`
 	TapGapMillis   int    `json:"tripletap_gap_ms"` // max time between presses
+	// HandStock turns off mods that were started by hand (no release
+	// installed): xovi's own stock script.
+	HandStock string `json:"hand_stock"`
 
 	HTTPTimeout int `json:"http_timeout_seconds"` // per run, all requests
 }
@@ -91,6 +94,7 @@ func Defaults() Config {
 		RunDir:          "/run/paper-pure",
 		SysClassInput:   "/sys/class/input",
 		TapGapMillis:    3000,
+		HandStock:       "/home/root/xovi/stock",
 		HTTPTimeout:     900,
 	}
 }
@@ -135,3 +139,6 @@ func (c Config) stateDir() string            { return filepath.Join(c.Root, "sta
 func (c Config) downloadsDir() string        { return filepath.Join(c.Root, "downloads") }
 func (c Config) disableFile() string         { return filepath.Join(c.Root, "disable") }
 func (c Config) liveFile() string            { return filepath.Join(c.RunDir, "live") }
+
+// syncFile is what pp-proxy (server/tablet-proxy) writes about stock sync.
+func (c Config) syncFile() string { return filepath.Join(c.RunDir, "sync.json") }

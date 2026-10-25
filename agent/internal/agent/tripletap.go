@@ -58,6 +58,9 @@ func (a *Agent) Toggle(ctx context.Context) error {
 	// A stopped install is rolled back without turning the old release on
 	// again. It is marked failed, so it is not retried by itself.
 	a.recover(ctx, false)
+	// A human said off or on. Off sticks: no install and no boot turns
+	// mods on until the next triple-press.
+	a.st.ModsOff = off
 	if off {
 		res, err := a.modsOff(ctx)
 		return a.end(ctx, res, err)
@@ -71,7 +74,15 @@ func (a *Agent) modsOff(ctx context.Context) (string, error) {
 	if id == "" && a.preloaded(ctx) {
 		id = a.st.Current // on, but not by us: any release's deactivate is stock
 		if id == "" {
-			return "tripletap: xochitl has a preload but no release is installed", errors.New("cannot turn mods off: no release installed to run deactivate.sh; run /home/root/xovi/stock")
+			// Started by hand (mods/install.sh) before any release: xovi's own stock script.
+			a.resetFailed(ctx)
+			if err := a.runScript(ctx, a.cfg.HandStock, "", "tripletap", time.Duration(a.cfg.HookTimeout)*time.Second); err != nil {
+				a.st.event(a.now(), "tripletap", "", false, "hand-started mods: "+err.Error())
+				return "tripletap: could not turn hand-started mods off", err
+			}
+			a.clearLive()
+			a.st.event(a.now(), "tripletap", "", true, "mods off (started by hand, no release)")
+			return "tripletap: mods off (started by hand)", nil
 		}
 	}
 	if id == "" {

@@ -192,11 +192,38 @@ func (a *Agent) resetFailed(ctx context.Context) {
 	}
 }
 
-// runChecks runs the built-in checks, then the release's checks/* in order.
+// runChecks runs the built-in checks, then the release's checks/* in
+// order, and keeps the outcome for the status report.
 func (a *Agent) runChecks(ctx context.Context, id, reason string, m *release.Manifest) error {
-	if err := a.checkXochitl(ctx, m); err != nil {
-		return err
+	err := a.checkXochitl(ctx, m)
+	if err == nil {
+		err = a.runReleaseChecks(ctx, id, reason)
 	}
+	a.noteChecks(id, reason, err)
+	return err
+}
+
+// recheck re-runs the live release's checks/* (not the 70 s xochitl
+// window), so the status report says whether they still pass while mods
+// are on. It changes nothing: a failure is reported, not acted on.
+func (a *Agent) recheck(ctx context.Context) {
+	id := a.live()
+	if id == "" || id != a.st.Current || a.disabled() {
+		return
+	}
+	err := a.runReleaseChecks(ctx, id, "recheck")
+	a.noteChecks(id, "recheck", err)
+	if err != nil {
+		a.logf("recheck %s: %v", id, err)
+	}
+}
+
+func (a *Agent) noteChecks(id, reason string, err error) {
+	a.checksRan = true
+	a.st.Checks = &CheckResult{Time: a.now().UTC(), Release: id, Reason: reason, OK: err == nil, Error: errOr(err, "")}
+}
+
+func (a *Agent) runReleaseChecks(ctx context.Context, id, reason string) error {
 	dir := filepath.Join(a.cfg.releaseDir(id), "checks")
 	ents, err := os.ReadDir(dir)
 	if err != nil {

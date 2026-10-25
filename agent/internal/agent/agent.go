@@ -28,6 +28,7 @@ type Agent struct {
 	osVersion string
 	http      *http.Client
 	lockFile  *os.File
+	checksRan bool // this run already ran a release's checks
 
 	// Test seams. nil means the real thing.
 	Probe func(ctx context.Context) (XochitlInfo, error)
@@ -259,7 +260,10 @@ func (a *Agent) install(ctx context.Context, m *release.Manifest, reason string)
 		a.st.Previous = old
 	}
 	a.st.Current, a.st.Pending = m.ID, ""
-	a.st.UnhealthyBoots, a.st.GuardTripped = 0, false
+	a.st.UnhealthyBoots, a.st.GuardTripped, a.st.ModsOff = 0, false, false
+	if m.Created.After(a.st.NewestCreated) {
+		a.st.NewestCreated = m.Created
+	}
 	a.st.event(a.now(), reason, m.ID, true, "healthy, committed")
 	if err := a.save(); err != nil {
 		return err
@@ -289,7 +293,9 @@ func (a *Agent) rollback(ctx context.Context, bad, why string, reactivate bool) 
 	msg := "rolled back to " + orStock(good) + ": " + why
 	if reactivate && good != "" && !a.st.GuardTripped && !a.disabled() {
 		m, err := a.loadManifest(good)
-		if err == nil {
+		if false {
+			msg += fmt.Sprintf("; %s not turned on: OS is %q, it was tested on %v", good, a.osVersion, m.OSVersions)
+		} else if err == nil {
 			err = a.activate(ctx, good, "rollback", m)
 		}
 		if err != nil {
@@ -360,14 +366,22 @@ func (a *Agent) Update(ctx context.Context) error {
 	}
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(a.cfg.HTTPTimeout)*time.Second+10*time.Minute)
 	defer cancel()
-	a.recover(ctx, true)
+	// Leftovers are rolled back without turning anything on: only an
+	// install, a triple-press or boot turns mods on (and boot checks the OS).
+	a.recover(ctx, false)
 	res, err := a.update(ctx)
+	if !a.checksRan {
+		a.recheck(ctx)
+	}
 	return a.end(ctx, res, err)
 }
 
 func (a *Agent) update(ctx context.Context) (string, error) {
 	if a.disabled() {
 		return "skipped: kill switch " + a.cfg.disableFile() + " exists", nil
+	}
+	if a.st.ModsOff {
+		return "skipped: mods were turned off by triple-press; a triple-press turns them on and lets updates in", nil
 	}
 	if a.cfg.FeedURL == "" {
 		return "no feed_url, nothing to do", nil
@@ -434,11 +448,21 @@ func (a *Agent) refuse(m *release.Manifest) string {
 	if !m.SupportsOS(a.osVersion) {
 		return fmt.Sprintf("tested on OS %v, this tablet runs %q", m.OSVersions, a.osVersion)
 	}
+	// Anti-replay: newer than anything ever committed here, not just the
+	// running release (a manual rollback runs an older one).
+	newest := a.st.NewestCreated
 	if a.st.Current != "" {
-		if cur, err := a.loadManifest(a.st.Current); err == nil && !m.Created.After(cur.Created) {
-			return fmt.Sprintf("created %s, not newer than current %s (%s); re-sign to roll back on purpose",
-				m.Created.Format(time.RFC3339), cur.ID, cur.Created.Format(time.RFC3339))
+		cur, err := a.loadManifest(a.st.Current)
+		if err != nil && newest.IsZero() {
+			return fmt.Sprintf("cannot read the running release's manifest (%v), so cannot tell whether this one is newer", err)
 		}
+		if err == nil && cur.Created.After(newest) {
+			newest = cur.Created
+		}
+	}
+	if !newest.IsZero() && !m.Created.After(newest) {
+		return fmt.Sprintf("created %s, not newer than current %s, the newest release installed here; re-sign to roll back on purpose",
+			m.Created.Format(time.RFC3339), newest.Format(time.RFC3339))
 	}
 	return ""
 }
@@ -497,6 +521,8 @@ func (a *Agent) boot(ctx context.Context) (string, error) {
 		return "boot: kill switch " + a.cfg.disableFile() + " exists, staying stock", nil
 	case !a.cfg.ActivateOnBoot:
 		return "boot: stock (activate_on_boot is off; triple-press turns " + id + " on)", nil
+	case a.st.ModsOff:
+		return "boot: stock (mods were turned off by triple-press; triple-press turns " + id + " on)", nil
 	case a.st.GuardTripped:
 		return fmt.Sprintf("boot: guard tripped, staying stock until a new release passes (%s not activated)", id), nil
 	}
@@ -548,6 +574,9 @@ func (a *Agent) Rollback(ctx context.Context) error {
 	m, err := a.loadManifest(prev)
 	if err != nil {
 		return a.end(ctx, "rollback: previous release unreadable", err)
+	}
+	if !m.SupportsOS(a.osVersion) {
+		return a.end(ctx, "rollback: refused", fmt.Errorf("OS is %q but %s was tested on %v", a.osVersion, prev, m.OSVersions))
 	}
 	if err := a.install(ctx, m, "manual-rollback"); err != nil {
 		return a.end(ctx, "rollback failed", err)

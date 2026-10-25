@@ -24,10 +24,29 @@ type State struct {
 	UnhealthyBoots int  `json:"unhealthy_boots"`
 	GuardTripped   bool `json:"guard_tripped"`
 
+	// ModsOff: a human turned mods off (triple-press). Nothing turns them
+	// on again, not an install and not boot, until a triple-press does.
+	ModsOff bool `json:"mods_off"`
+	// NewestCreated is the newest `created` of any release committed here.
+	// A feed release must be newer (anti-replay), even after a rollback.
+	NewestCreated time.Time `json:"newest_created"`
+	// Checks is the last time a release's checks ran, and how it went.
+	Checks *CheckResult `json:"checks,omitempty"`
+
 	LastRun    time.Time `json:"last_run"`
 	LastResult string    `json:"last_result"`
 	LastError  string    `json:"last_error"`
 	Events     []Event   `json:"events"`
+}
+
+// CheckResult is one run of a release's checks: at install, turn-on, boot,
+// or the recheck every update run does while mods are live.
+type CheckResult struct {
+	Time    time.Time `json:"time"`
+	Release string    `json:"release"`
+	Reason  string    `json:"reason"`
+	OK      bool      `json:"ok"`
+	Error   string    `json:"error,omitempty"`
 }
 
 // Event is one notable thing, kept for the status report.
