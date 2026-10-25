@@ -26,7 +26,7 @@ const CONTAINER = process.env.PPEMU_CONTAINER || process.env.RMEMU_CONTAINER || 
 // not milliseconds, after input, so gestures wait longer before calling the
 // screen settled. PPEMU_SLOW=1/0 forces either profile.
 const SLOW = process.env.PPEMU_SLOW ? process.env.PPEMU_SLOW === '1' : process.arch !== 'arm64';
-const SETTLE = SLOW ? { idle: 1200, min: 2500, timeout: 30000 } : { idle: 500, min: 300, timeout: 8000 };
+const SETTLE = SLOW ? { idle: 1500, min: 4000, timeout: 30000 } : { idle: 500, min: 300, timeout: 8000 };
 const device = new Device({ port: Number(process.env.RMEMU_DEVICE_PORT || 8888) });
 
 const docker = (args) => new Promise((resolve) => {

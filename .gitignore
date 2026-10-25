@@ -1,0 +1,5 @@
+# reMarkable firmware and anything unpacked from it never goes in the repo.
+*.swu
+*.ext4
+*.ext4.verity*
+rootfs-*/

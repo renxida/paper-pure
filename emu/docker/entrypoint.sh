@@ -1,5 +1,5 @@
 #!/bin/sh
-# PID 1 of the emulated Paper Pro: brings up the bits of the userland xochitl
+# PID 1 of the emulated Paper Pure: brings up the bits of the userland xochitl
 # needs and supervises services the way systemd's Restart= would.
 export LANG=C.UTF-8
 

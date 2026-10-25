@@ -227,9 +227,17 @@ async function start(version) {
   }
   const up = await waitFor(async () => (await status()).connected, T(30000, 180000));
   // A fresh boot shows the splash first; don't hand over until the UI is up.
-  if (up && !c?.running) await fetch(UI + `/api/wait?idle=${T(1500, 5000)}&min=${T(4000, 25000)}&timeout=${T(20000, 180000)}`).catch(() => {});
+  if (up && !c?.running) await bootWait();
   console.log(up ? `Paper Pure emulator running — ${UI}${SLOW ? ' (qemu-user: slow, be patient)' : ''}` : `server up at ${UI}, but the device hasn't connected yet (ppemu logs)`);
   console.log(`ssh: ppemu ssh   (or: ssh -i ${path.relative(process.cwd(), KEY)} -p ${SSH_PORT} root@127.0.0.1)`);
+}
+
+// Until xochitl is past its "Paper tablet is loading" splash. Under qemu-user
+// the splash's progress bar fills, then the screen sits still for ~25 s while
+// xochitl builds the home screen (main thread busy), so only a long quiet
+// spell means "done" there.
+async function bootWait() {
+  await fetch(UI + `/api/wait?idle=${T(1500, 40000)}&min=${T(4000, 30000)}&timeout=${T(20000, 300000)}`).catch(() => {});
 }
 
 function stop() {
@@ -324,7 +332,7 @@ const commands = {
       systemctl start xochitl`;
     if (docker(['exec', CONTAINER, 'sh', '-c', script]).status) die('could not update device settings');
     await waitFor(async () => (await status()).connected, T(20000, 120000));
-    await api(`/api/wait?idle=${T(1500, 5000)}&min=${T(4000, 25000)}&timeout=${T(20000, 180000)}`);  // past the boot splash
+    await bootWait();
     console.log('onboarding skipped; xochitl restarted');
   },
   async wait() {

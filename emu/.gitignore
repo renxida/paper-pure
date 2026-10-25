@@ -1,11 +1,9 @@
-# Firmware is downloaded by `rmemu setup` (reMarkable's, not redistributable here)
-firmware/
-*.swu
-*.ext4
-*.ext4.verity*
-rootfs/
+# Firmware fetched by `ppemu setup`: reMarkable's, never commit or redistribute.
+# Anchored so docker/root/sys/firmware/ (fake device tree) stays tracked.
+/firmware/
+/rootfs/
 # Emulator runtime state: SSH key, server pid/log
-.rmemu/
+/.ppemu/
 screenshot.png
 node_modules/
 .DS_Store

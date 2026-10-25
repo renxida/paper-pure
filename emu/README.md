@@ -1,115 +1,110 @@
-# rmemu: an unofficial reMarkable Paper Pro emulator
+# emu: Paper Pure emulator
 
-Runs the **stock reMarkable Paper Pro OS** on an Apple Silicon Mac so you can test software before putting it on a tablet in developer mode. Both are arm64, so the device's own root filesystem runs natively in Docker. A preload shim fakes the hardware: e-ink controller, pen, touch, buttons, sensors and the secure key store. You drive it from a browser simulator UI or from the `bin/rmemu` CLI, which works for scripts and AI agents.
+Rung 2 of the dev loop. Boots the **stock Paper Pure OS (tatsu, 3.27.2.2, the version on Cedar's tablet)** in a Docker container and lets Claude drive it from a CLI: look, tap, write, SSH in, deploy, restart.
 
-![The simulator UI: a Paper Pro frame with the live screen, tool picker and hardware buttons](docs/screenshots/simulator.jpg)
+The device's own root filesystem runs unmodified in an arm64 container. A preload shim fakes the hardware xochitl talks to: the e-ink controller (SWTCON over a fake DRM device), pen, touch, buttons, battery, charger, temperature, secure key store. Native on arm64 (Apple Silicon, arm64 Linux); under qemu-user on x86_64, which works but is slow.
 
-| Pen + eraser | Settings |
-|---|---|
-| ![Notebook with a pen stroke and a partly erased line](docs/screenshots/drawing.png) | ![General settings showing version 3.27.1.0](docs/screenshots/settings.png) |
+Forked from [rmemu](https://github.com/aetherino/rmemu) (Paper Pro emulator, MIT, upstream commit `3483a43`, license kept in [LICENSE.rmemu](LICENSE.rmemu)). We adapt it, we don't rewrite it.
 
-> **Disclaimer.** This is an independent, unofficial project. It is not affiliated with or endorsed by reMarkable AS. "reMarkable", "Paper Pro" and "Marker" are trademarks of reMarkable AS, used only to identify the hardware. This repo contains no reMarkable software. You download the firmware yourself (see below), and it stays subject to reMarkable's terms. Screenshots show their UI (© reMarkable AS). Cloud sync is intentionally not supported.
+> No reMarkable code lives here. `ppemu setup` downloads reMarkable's public update package into `emu/firmware/` (gitignored) for local use. Never commit or redistribute it, or anything unpacked from it.
 
-## Quick start
+## Run it
 
-You need Docker Desktop and Node 20 or newer, on Apple Silicon (or any arm64 Linux machine).
+Needs Docker, Node 20+, `curl`, `openssl`, `ssh`/`ssh-keygen`. On x86_64 also qemu-user binfmt for arm64 (`docker run --privileged --rm tonistiigi/binfmt --install arm64`, or the `qemu-user-static` package).
 
 ```bash
-bin/rmemu start        # first run fetches the firmware (~200 MB) and builds the image
-bin/rmemu open         # simulator UI at http://127.0.0.1:7777
-bin/rmemu skip-setup   # optional: skip first-boot onboarding
+emu/bin/ppemu start          # first run: fetch + verify firmware (~140 MB), build image, boot
+emu/bin/ppemu skip-setup     # fresh device: skip onboarding, land on My files
+emu/bin/ppemu screenshot /tmp/s.png --scale 0.5
+emu/bin/ppemu tap 700 1716   # device pixels, portrait 1404x1872
+emu/bin/ppemu draw 700,900 1250,900
+emu/bin/ppemu ssh 'cat /etc/os-release'
+emu/bin/ppemu logs | tail
+emu/bin/ppemu reset          # factory reset (wipes the pp-emu-home / pp-emu-data volumes)
+emu/bin/ppemu help           # everything else
 ```
 
-Device data persists in the `rmemu-home` and `rmemu-data` Docker volumes. `bin/rmemu reset` factory-resets the device.
+Simulator UI for humans: http://127.0.0.1:7777 (pen, eraser, finger, power key, Marker). Agents: [the `pure-emulator` skill](../.claude/skills/pure-emulator/SKILL.md).
 
-## Getting the firmware
+Names: container `pp-emu-tablet`, images `pp-emu-tatsu:<version>` (emulator) and `pp-emu-rootfs:<version>` (plain rootfs), volumes `pp-emu-home` and `pp-emu-data`. Ports on 127.0.0.1: 7777 UI + HTTP API, 8888 device hub, 2222 SSH.
 
-The emulator needs a Paper Pro firmware update package, a `.swu` file named like `remarkable-production-image-3.27.1.0-ferrari-public.swu`. Use the version your tablet runs (Settings → General → Software). There are two ways to get it:
+How slow is x86_64? Measured here (4 vCPU, qemu 8.2): cold boot to the first screen about 75 s and to My files about 100 s; a tap reacts in 1 to 5 s; opening a notebook about 5 s; a pen stroke shows in about 2 s. The CLI waits longer on non-arm64 hosts (`PPEMU_SLOW=1|0` overrides).
 
-**1. Let rmemu fetch it (easiest).**
+## Firmware
 
-```bash
-bin/rmemu versions          # versions available for the Paper Pro
-bin/rmemu setup 3.27.1.0    # download, verify the sha256, build rmemu:3.27.1.0
-bin/rmemu start 3.27.1.0
-```
+`ppemu setup [version]` defaults to 3.27.2.2 from reMarkable's public update bucket (`remarkable-software.s3.us-east-2.amazonaws.com`, listable; `ppemu versions` shows what is there). Checks, in order:
 
-It downloads reMarkable's own update package from the public mirrors listed in [codexctl](https://github.com/Jayy001/codexctl)'s version index into `firmware/`, and checks it against the index's sha256.
+1. sha256 of the `.swu` against a pinned table in `bin/ppemu` (3.27.2.2 and 3.27.1.0 are pinned; other versions warn and skip this step).
+2. `sw-description.sig` verifies against the swupdate public key shipped inside the image (`/usr/share/swupdate/swupdate-payload-key-pub.pem`), and that key's sha256 matches the fingerprint pinned in `tools/import-rootfs.sh`.
+3. The rootfs image's sha256 matches the one `sw-description` lists.
 
-**2. Bring your own `.swu`.** Use this for a file from [codexctl](https://github.com/Jayy001/codexctl) (`codexctl download 3.27.1.0 --hardware rmpp -o firmware/`) or any other copy:
+Already have the file? `ppemu setup --swu FILE`, drop it in `emu/firmware/`, or point `PPEMU_FIRMWARE_DIR` at its folder.
 
-```bash
-tools/import-rootfs.sh firmware/<file>      # prints rmpp-rootfs:<version>
-docker build --build-arg ROOTFS=rmpp-rootfs:<version> -t rmemu:<version> -f docker/Dockerfile .
-bin/rmemu start <version>
-```
+## How it differs from upstream rmemu
 
-`import-rootfs.sh` unpacks the `.swu` (a cpio archive containing an ext4 image) with `debugfs` in a throwaway container. It needs no root access or privileged mode. Firmware files are gitignored. Don't commit or redistribute them.
+| Area | rmemu (Paper Pro, ferrari) | here (Paper Pure, tatsu) | How we know |
+| --- | --- | --- | --- |
+| Screen | 1620x2160 RGB32 | 1404x1872 RGB32 (`EPFramebufferCarta1300`) | `fb:` log line, screenshots |
+| SWTCON scanout mode | 405x1084 | 260x1408 | xochitl logs `DRM error: size mismatch ... (expected 1408x260)` |
+| Battery / charger sysfs | `max1726x_battery`, `max77963-charger` | `max77818_battery`, `max77818-charger` (marker-manager still reads `max77963-charger/online`, mirrored) | strings in `libcslpower.so`, `marker-manager` |
+| Temperature hwmon | `rm_hwmon_temp` | `ertj0eg103fa` | `temperature_hwmon: found temperature path` in log |
+| Device tree `display-info` | absent | 1404 / 1872 / 228 dpi (big-endian), same as libepaper's built-in fallback | disassembly of `EpaperIntegration::readDisplayInfo` |
+| Front light, keyboard light, Folio keyboard | yes | none on the Pure, nothing to fake | `libcsllight.so` absent |
+| x86 hosts | not supported | works under qemu-user, with two shim fixes (below) | boots here |
+| Firmware source | codexctl index | pinned table + reMarkable's bucket; codexctl only lists 3.27.1.0 for the Pure | `data/version-ids.json` |
+| Names | `rmemu`, `bin/rmemu` | `pp-emu-*`, `bin/ppemu` (same commands, plus `rebuild`) | |
 
-## Simulator UI
+The two qemu-user fixes in `shim/hooks.c`:
 
-- **Pen / Eraser / Finger** (P / E / F): drive the digitizer or the touchscreen. Pressure and tilt come through if you use a real stylus. Hold ⌥ in Finger mode to pinch.
-- **Toolbar**: power, Folio cover, screenshot (⌘S), restart xochitl, and "paper tone" (an approximation of the e-ink look).
-- **Marker** beside the device: click it to attach the Marker (docks and charges it) or detach it.
-- **Status bar**: shows the cursor position in device pixels, ready to paste into `rmemu tap`.
+- **Alarm clocks.** `clock_gettime(CLOCK_BOOTTIME_ALARM)` fails on hosts without a wake-capable RTC, so sd-event refuses alarm timers and marker-manager aborts (`Failed to add timer: Operation not supported`). The shim falls back to the plain clock, as upstream already did for `timerfd_create`.
+- **Top realtime signals.** qemu-user can't map guest signals 62 to 64 onto host signals, so blocking them silently does nothing and `sd_event_add_signal` returns EBUSY; xochitl aborts (`Failed to add SIGNO_PRE_AUTOSLEEP handler`). The shim listens on a spare signal instead. Those signals come from the suspend-event driver, which doesn't exist here.
 
-## CLI
+Internal names (`/opt/rmemu`, `/run/rmemu`, `RMEMU_*`, `rmemud`) stay as upstream so their fixes still apply cleanly.
 
-Coordinates are device pixels: portrait, 1620×2160, origin at top-left. Input commands wait until the screen and the e-ink panel settle, then report whether anything changed.
+## Blind spots
 
-```bash
-bin/rmemu screenshot shot.png --scale 0.5    # multiply by 2 for device coordinates
-bin/rmemu tap 810 1916 [--pen|--eraser]
-bin/rmemu longpress X Y · swipe X0 Y0 X1 Y1 · pinch CX CY R0 R1
-bin/rmemu draw 300,700 500,600 700,800 --pressure 0.7
-bin/rmemu power · folio close · marker dock · usb connect · battery 15
-bin/rmemu wait --idle 500
-bin/rmemu ssh 'cmd' · push LOCAL REMOTE · pull REMOTE LOCAL
-bin/rmemu restart [--debug] · logs -f
-```
+What the emulator can't tell you. Test these on the tablet.
 
-Run `bin/rmemu help` for everything. An HTTP API (screenshot, gesture, wait, status, logs) sits behind the UI; see [host/server.mjs](host/server.mjs). Agents: see the [`paperpro-emulator` skill](.claude/skills/paperpro-emulator/SKILL.md).
+- **E-ink timing.** No waveforms reach a panel. The screenshot is the image xochitl renders, shown instantly; no flashing, ghosting, or partial-refresh artifacts. SWTCON runs against a fake DRM device paced at a guessed 85 Hz, so refresh durations mean nothing. Waveform selection also fails (`wf_search: unable to read epd serial`, no devconfig), which is harmless here and untested.
+- **Pen latency and feel.** Pen events are synthetic evdev at 1/10 px with made-up Elan device names and ranges (copied from the Paper Pro, not read off a Pure). Under qemu-user everything is 10x to 50x slower. Desiderata #4 (writing feel) can only be judged on hardware.
+- **Battery.** Fake sysfs numbers; `ppemu battery N` and `ppemu usb connect` change them. No discharge curve, no fuel-gauge behaviour.
+- **Sleep.** The power key shows the sleep screen and wakes again, but nothing suspends: writes to `/sys/power/state` land in a fake file, alarm timers run on plain clocks, and xochitl logs `Missing resume event, triggering fallback wakeup`.
+- **Colour.** xochitl renders an RGB32 image; the real panel is grayscale. Highlighter/colour ink shows in colour in screenshots. A second 1404x1872 Grayscale8 buffer exists but stays empty here.
+- **Not running at all:** Wi-Fi, Bluetooth, cloud sync, swupdate/update-engine (OTA), memfaultd, tee-supplicant (a software PKCS#11 token stands in for OP-TEE), real orientation sensor, NFC (marker-manager talks to fake sysfs).
 
-## Developing for the tablet
+## Change the emulator
 
-The emulator behaves like a tablet in developer mode:
+- C in `shim/` (preload library, `shim/pkcs11/` soft token) and `daemon/rmemud.c` compiles inside the Docker build (Ubuntu 24.04 arm64; glibc 2.39 matches the rootfs). After editing: `emu/bin/ppemu rebuild` (keeps device data).
+- Missing hardware: `ppemu restart --debug`, then `ppemu logs` shows every hardware path and ioctl; `FAIL` lines are what's missing. Fake sysfs goes in `docker/root/sys/...`.
+- Host side (`host/`, `bin/ppemu`) is plain Node with no dependencies.
 
-- `bin/rmemu ssh` gives the device's own root login, the equivalent of `ssh root@10.11.99.1`.
-- `systemctl restart xochitl` works.
-- Every process sees the same fake `/sys` and `/dev/input` nodes, so apps reading pen and touch events directly get live input.
-- The binaries are byte-for-byte the shipped ones, so hooks and extensions built for a firmware version run against the same code.
+## Status
 
-## How it works
+Verified in this container (x86_64, 4 vCPU, Docker 29, qemu-aarch64 8.2.2), Oct 25 2026:
 
-```
- Mac                                  container (stock Paper Pro rootfs, linux/arm64)
-┌──────────────────────┐   :8888    ┌───────────────────────────────────────────────┐
-│ host/server.mjs      │◀──────────▶│ rmemud   input hub · display relay · uevents  │
-│  · simulator UI (WS) │            │ xochitl ── rmemu-shim.so (via ld.so.preload)  │
-│  · HTTP API          │   :2222    │   fake DRM for SWTCON · framebuffer capture   │
-│ bin/rmemu (CLI)      │◀── ssh ───▶│   evdev · udev · sd_device · libiio · sysfs   │
-└──────────────────────┘            │   PKCS#11 soft token · marker-manager · dbus  │
-                                    └───────────────────────────────────────────────┘
-```
+- `tools/import-rootfs.sh .../remarkable-production-image-3.27.2.2-tatsu-public.swu` → `import-rootfs: signature ok, rootfs sha256 ok (3.27.2.2)`, image `pp-emu-rootfs:3.27.2.2` in 65 s.
+- Negative checks: the same `.swu` with one edit in `sw-description` → `sw-description.sig does not verify`, exit 1; `PPEMU_KEY_SHA=0000` → `swupdate key sha256 is 7f77934c..., expected 0000`, exit 1.
+- `ppemu versions` → lists 3.27.1.0, 3.27.2.2 (pinned, default), 3.27.3.0, 3.28.0.172, 3.29.0.153 from the bucket.
+- `ppemu setup` with an empty `emu/firmware/` → downloaded 3.27.2.2 from the bucket, pinned sha256 matched, built `pp-emu-tatsu:3.27.2.2`.
+- `ppemu reset && ppemu start` → boots; screenshot shows "Welcome to your reMarkable Paper Pure / Choose your language to begin" at 1404x1872.
+- `ppemu tap 700 880` on the language list → UI switches to German (`Activated translation: de` in the log); tapping English switches back.
+- `ppemu skip-setup` → My files ("Make your mark" empty state).
+- `ppemu tap 700 1716` (+) → Create new menu; Notebook → New notebook dialog; Create → open notebook with the writing-tools tooltip.
+- `ppemu draw ...` → strokes appear where drawn; the stroke is saved (`rm.scenefile Scene written to ...`) and shows in the My files thumbnail.
+- `ppemu power` → "Paper tablet is sleeping" screen; `ppemu power` again → back to the notebook.
+- `ppemu battery 15` → xochitl logs `battery level=15`, status bar battery icon drops. `ppemu usb connect` → charging bolt in the status bar.
+- `ppemu marker dock` → marker-manager and xochitl react (`Starting marker mcu firmware update timer`); NFC driver missing, as expected.
+- `ppemu ssh 'ls /home/root/.local/share/remarkable/xochitl/'` → lists the notebook; `ppemu pull` copies it out; the `.rm` parses with rmscene.
+- `ppemu logs`, `ppemu status`, `ppemu restart`, `ppemu restart --debug` work.
 
-- **Display** ([shim/drm.c](shim/drm.c), [shim/fb.c](shim/fb.c)): xochitl drives the panel through SWTCON over atomic KMS. The shim provides that KMS device with the panel's real 405×1084 scanout mode, paces flips at 85 Hz, and streams the 1620×2160 image xochitl renders.
-- **Input** ([shim/input.c](shim/input.c), [daemon/rmemud.c](daemon/rmemud.c)): fake evdev devices for the Elan pen and touchscreen, the power key and the hall sensors, fanned out to every reader. Fake udev and `sd_device` support lets Qt find the devices and carries charger and Marker-docking events.
-- **The rest** ([shim/](shim/), [docker/root/](docker/root/)): a software PKCS#11 token in place of OP-TEE, the orientation sensor, a sysfs tree (battery, charger, temperature, display info, secure boot reported as unlocked), and faked realtime thread priority.
+Not verified:
 
-**Not emulated yet:**
+- arm64 hosts (Apple Silicon, arm64 Linux). Nothing x86-specific was added, and upstream runs natively there, but it was not run.
+- That the fake input device names and ranges match a real Pure; that 228 dpi is the panel's real device-tree value.
+- The simulator UI in a browser (the HTTP API behind it was used for every test above).
 
-- E-ink refresh visuals (no flash or ghosting)
-- Wi-Fi and cloud sync
-- Auto-rotation
-- Type Folio keyboard and Bluetooth
-- Intel Macs
+Open questions for Cedar:
 
-## Reference
-
-- **The device:** `ferrari` (Paper Pro Move is `chiappa`), an NXP i.MX 8M Mini (4× Cortex-A53) with an 11.8" 1620×2160 color e-ink display. It runs reMarkable OS (Yocto scarthgap) with xochitl on Qt 6.8.
-- **Developer mode:** Settings → General → Paper Tablet → Software → Advanced → Developer Mode. Turning it on **factory resets** the tablet, so sync first. The root password is in Settings → General → Help → About → Copyrights and Licenses.
-- **Links:** [developer mode](https://developer.remarkable.com/documentation/developer-mode) · [SDK](https://developer.remarkable.com/documentation/sdk) · [kernel](https://github.com/reMarkable/linux-imx-rm) · [codexctl](https://github.com/Jayy001/codexctl) (GPL-3.0; its version index is fetched at a pinned commit).
-
-## License
-
-MIT ([LICENSE](LICENSE)). It covers this repository's code only and grants no rights in reMarkable's software.
+- When you enable developer mode, can we read a few real values off the tablet (`cat /proc/device-tree/display-info/*`, `ls /sys/class/power_supply /sys/class/input/*/device/name`)? That would turn the guesses above into facts.
+- The first stroke in a fresh notebook came out in highlighter yellow (tool Pencil, colour 9 "highlight") until Black was picked. Does a fresh notebook on your tablet do the same?
+- Which machine runs the emulator day to day? x86 works but costs ~100 s per boot and seconds per tap; an arm64 box would make it interactive.

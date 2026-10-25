@@ -21,7 +21,7 @@ KEY_SHA=${PPEMU_KEY_SHA:-7f77934c86f157a887e942ee64b1916ea957dba2bc970fb1696501d
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
-mkdir "$work/fw" "$work/out"
+mkdir "$work/fw"
 (cd "$work/fw" && cpio -id --quiet < "$swu")
 img=$(ls "$work"/fw/*.ext4.verity.gz)
 gunzip -c "$img" > "$work/fw/rootfs.ext4"
@@ -40,8 +40,10 @@ openssl dgst -sha256 -verify "$work/key.pem" -signature "$work/fw/sw-description
     { echo "import-rootfs: sw-description.sig does not verify" >&2; exit 1; }
 want=$(grep -A4 "filename = \"$(basename "$img")\"" "$work/fw/sw-description" | sed -nE 's/.*sha256 = "([0-9a-f]{64})".*/\1/p' | head -1)
 have=$(openssl dgst -sha256 -r "$img" | cut -d' ' -f1)
-[ -n "$want" ] && [ "$want" = "$have" ] ||
-    { echo "import-rootfs: rootfs sha256 $have does not match sw-description ($want)" >&2; exit 1; }
+if [ -z "$want" ] || [ "$want" != "$have" ]; then
+    echo "import-rootfs: rootfs sha256 $have does not match sw-description ($want)" >&2
+    exit 1
+fi
 echo "import-rootfs: signature ok, rootfs sha256 ok ($version)" >&2
 
 docker run --rm -v "$work/fw":/fw:ro ubuntu:24.04 sh -c \
