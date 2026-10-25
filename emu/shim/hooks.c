@@ -65,6 +65,17 @@ FILE *fopen(const char *path, const char *m) {
 }
 FILE *fopen64(const char *path, const char *m) { return fopen(path, m); }
 
+// busybox hexdump (and anything else using freopen) must see the fakes too.
+FILE *freopen(const char *path, const char *m, FILE *s) {
+    REAL(freopen);
+    char buf[512];
+    const char *p = redirect(path, buf, sizeof buf);
+    FILE *f = real_freopen(p, m, s);
+    if (hw_path(path)) TRACE("freopen %s%s -> %s", path, p != path ? " (fake)" : "", f ? "ok" : "FAIL");
+    return f;
+}
+FILE *freopen64(const char *path, const char *m, FILE *s) { return freopen(path, m, s); }
+
 DIR *opendir(const char *path) {
     REAL(opendir);
     char buf[512];

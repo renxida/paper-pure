@@ -65,7 +65,7 @@ Develop
   ssh [cmd...]              like ssh root@10.11.99.1 on a dev-mode device
   push LOCAL REMOTE         copy into the device
   pull REMOTE LOCAL         copy out of the device
-  restart [--debug]         restart xochitl (--debug: with shim tracing of every hardware access)
+  restart [--debug]         restart xochitl, wait for its UI (--debug: shim traces every hardware access)
   logs [-f]                 container log
 
 Env: PPEMU_FIRMWARE_DIR (extra place to look for .swu files), PPEMU_CONTAINER,
@@ -266,7 +266,10 @@ const commands = {
     stop();
     docker(['rm', '-f', CONTAINER], { capture: true });
     docker(['volume', 'rm', ...VOLUMES.map(([v]) => v)], { capture: true });
-    console.log('device data wiped');
+    // Don't claim a wipe that didn't happen (e.g. another container still uses a volume).
+    const left = VOLUMES.map(([v]) => v).filter((v) => !docker(['volume', 'inspect', v], { capture: true }).status);
+    if (left.length) die(`could not remove ${left.join(', ')} (docker ps -a --filter volume=${left[0]})`);
+    console.log('device data wiped (next start boots a factory-fresh device)');
   },
   async status() {
     const c = containerState();
@@ -351,9 +354,14 @@ const commands = {
     if (pos.length !== 2) die('pull REMOTE LOCAL');
     process.exit(docker(['cp', `${CONTAINER}:${pos[0]}`, pos[1]]).status ?? 1);
   },
-  restart() {
-    docker(['exec', CONTAINER, 'sh', '-c', `${flags.debug ? 'touch' : 'rm -f'} /run/rmemu-debug; systemctl restart xochitl`]);
-    console.log(`xochitl restarting${flags.debug ? ' with shim tracing (ppemu logs -f)' : ''}`);
+  async restart() {
+    // Captured: with tracing on, the shim in this shell would chatter too.
+    const r = docker(['exec', CONTAINER, 'sh', '-c', `${flags.debug ? 'touch' : 'rm -f'} /run/rmemu-debug; systemctl restart xochitl`], { capture: true });
+    if (r.status) die(`restart failed: ${r.stderr.trim() || 'is the emulator running? (ppemu status)'}`);
+    // Until the new xochitl has drawn its UI: before that, screenshots show the
+    // old frame and input goes nowhere (about a minute under qemu-user).
+    await bootWait();
+    console.log(`xochitl restarted${flags.debug ? ' with shim tracing (ppemu logs -f)' : ''}`);
   },
   logs() {
     const child = spawn('docker', ['logs', ...(flags.follow ? ['-f'] : []), '--tail', '300', CONTAINER], { stdio: ['ignore', 'pipe', 'pipe'] });

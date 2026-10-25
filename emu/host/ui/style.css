@@ -74,7 +74,7 @@ button:focus-visible { outline: 2px solid #7fb4ff; outline-offset: 1px; }
   display: grid; place-items: center;
 }
 
-/* Paper Pure: 156.4 x 208.6 mm active area (1404x1872 at 228 dpi). The
+/* Paper Pure: 157.8 x 210.4 mm active area (1404x1872 at 226 dpi). The
    187 x 246 mm body is an approximation, for looks only. */
 .device {
   --w: min(calc((100vh - var(--toolbar-h) - var(--status-h) - 44px) * 187 / 246), calc(100vw - 120px));
@@ -89,8 +89,8 @@ button:focus-visible { outline: 2px solid #7fb4ff; outline-offset: 1px; }
 }
 .screen {
   position: absolute;
-  left: calc(15.3 / 187 * 100%); right: calc(15.3 / 187 * 100%);
-  top: calc(18.7 / 246 * 100%); bottom: calc(18.7 / 246 * 100%);
+  left: calc(14.6 / 187 * 100%); right: calc(14.6 / 187 * 100%);
+  top: calc(17.8 / 246 * 100%); bottom: calc(17.8 / 246 * 100%);
   background: var(--screen-paper); overflow: hidden;
   border-radius: 2px;
   box-shadow: 0 0 0 1px #0d0d0e, inset 0 0 6px rgba(0, 0, 0, 0.18);

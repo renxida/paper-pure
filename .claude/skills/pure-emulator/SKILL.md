@@ -15,7 +15,7 @@ Run commands from the repo root. Cedar may be watching the same device at http:/
 emu/bin/ppemu status        # container, UI server, images, host speed
 emu/bin/ppemu start         # boot (first run fetches + verifies firmware and builds the image)
 emu/bin/ppemu skip-setup    # fresh device: skip onboarding, land on My files
-emu/bin/ppemu reset         # factory reset: wipes pp-emu-home/pp-emu-data (all notebooks). Ask first if someone else uses it
+emu/bin/ppemu reset         # factory reset: wipes pp-emu-home/pp-emu-data (all notebooks), leaves it stopped; `start` then boots onboarding. Ask first if someone else uses it
 ```
 
 On an x86 host the device runs under qemu-user: boot is ~100 s, `start` and `skip-setup` wait for it. `status` says `slow` when this applies.
@@ -65,10 +65,11 @@ The emulator behaves like a tablet in developer mode:
 emu/bin/ppemu ssh 'cmd'                  # like ssh root@10.11.99.1; interactive with no cmd
 emu/bin/ppemu push ./thing /home/root/thing
 emu/bin/ppemu pull /home/root/.local/share/remarkable/xochitl ./out
-emu/bin/ppemu restart                    # = systemctl restart xochitl (also works inside ssh)
+emu/bin/ppemu restart                    # restart xochitl and wait for its UI (~60 s under qemu); `systemctl restart xochitl` over ssh doesn't wait
 emu/bin/ppemu logs [-f]                  # xochitl + shim + rmemud
 ```
 
+- Identity, as on the tablet: `cat /etc/version` → `20260520084102`; `/sys/devices/soc0/machine` and `/proc/device-tree/model` → `reMarkable Tatsu`; `IMG_VERSION="3.27.2.2"` in `/etc/os-release`.
 - Scripts written for the real tablet: `ssh -i emu/.ppemu/id_ed25519 -p 2222 root@127.0.0.1` (swap for `root@10.11.99.1` on hardware).
 - Only `/home` and `/data` persist (Docker volumes). Everything else is the read-only-in-spirit rootfs and resets when the container is recreated, like an OTA on the device.
 - Notebooks: `/home/root/.local/share/remarkable/xochitl/`. Settings: `/home/root/.config/remarkable/xochitl.conf`, `/data/xochitl.conf`.
@@ -90,7 +91,7 @@ emu/bin/ppemu logs [-f]                  # xochitl + shim + rmemud
 | Notebook toolbar (x=56) | pen, 2nd pen, text, eraser, select, layers, undo, redo | y = 168, 280, 392, 504, 616, 728, 840, 952 |
 | Pen panel | Black, Gray, White, Blue, Red | 200,856; 312,856; 424,856; 200,968; 312,968 |
 
-Keep strokes at x > 600 while the pen panel is open, x > 150 otherwise. First visits show tooltips; close them (the X in the tooltip) before drawing. A fresh notebook's first pen may be highlighter yellow; pick Black in the pen panel.
+Keep strokes at x > 600 while the pen panel is open, x > 150 otherwise. First visits show tooltips; close them (the X in the tooltip) before drawing. Check the colour in the pen panel before drawing: fresh notebooks started on black Pencil in our runs, but one early run drew highlighter yellow.
 
 ## 6. When something's off
 

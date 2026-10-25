@@ -64,13 +64,14 @@ static struct drm_mode_modeinfo panel_mode(void) {
     // SWTCON insists on this scanout geometry: each 32-bit "pixel" carries
     // packed waveform phases for several panel pixels. On the Pure (Carta
     // 1300, 1404x1872) it wants 260x1408; xochitl logs "DRM error: size
-    // mismatch ... (expected 1408x260)" otherwise. Blanking is a guess.
+    // mismatch ... (expected 1408x260)" otherwise. Timings are the tatsu
+    // device tree's epd-panel native mode: 34.8 MHz / (263 x 1557) = 85 Hz.
     struct drm_mode_modeinfo m = {0};
     m.hdisplay = 260; m.vdisplay = 1408;
-    m.hsync_start = 265; m.hsync_end = 270; m.htotal = 275;
-    m.vsync_start = 1410; m.vsync_end = 1412; m.vtotal = 1414;
+    m.hsync_start = 261; m.hsync_end = 262; m.htotal = 263;
+    m.vsync_start = 1555; m.vsync_end = 1556; m.vtotal = 1557;
     m.vrefresh = 85;
-    m.clock = (uint32_t)((uint64_t)m.htotal * m.vtotal * m.vrefresh / 1000);
+    m.clock = 34800;  // kHz
     m.type = DRM_MODE_TYPE_PREFERRED | DRM_MODE_TYPE_DRIVER;
     snprintf(m.name, sizeof m.name, "%dx%d", m.hdisplay, m.vdisplay);
     return m;
@@ -224,7 +225,8 @@ static int handle(unsigned long req, void *arg) {
         struct drm_version *v = arg;
         v->version_major = 1; v->version_minor = 0; v->version_patchlevel = 0;
 #define CP(f, s) do { size_t l = strlen(s); if (v->f && v->f##_len) memcpy(v->f, s, l < v->f##_len ? l : v->f##_len); v->f##_len = l; } while (0)
-        CP(name, "mxsfb-drm"); CP(date, "20160401"); CP(desc, "i.MX LCDIF Controller DRM");
+        // The tatsu kernel builds in imx-drm with the LCDIFv3 CRTC (no mxsfb).
+        CP(name, "imx-drm"); CP(date, "20120507"); CP(desc, "i.MX DRM graphics");
         return 0;
     }
     case DRM_IOCTL_GET_CAP: {
@@ -261,7 +263,7 @@ static int handle(unsigned long req, void *arg) {
         }
         c->count_modes = 1; c->count_encoders = 1; c->count_props = 2;
         c->encoder_id = ENC; c->connector_type = DRM_MODE_CONNECTOR_DPI; c->connector_type_id = 1;
-        c->connection = 1; c->mm_width = 156; c->mm_height = 209;  // 10.3" at 228 dpi
+        c->connection = 1; c->mm_width = 158; c->mm_height = 210;  // 1404x1872 at 226 dpi (device tree)
         return 0;
     }
     case DRM_IOCTL_MODE_GETENCODER: {
