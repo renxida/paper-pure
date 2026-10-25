@@ -129,7 +129,16 @@ if [ -n "$PROXY" ]; then
 fi
 
 step "freeze the OS, keep SSH private, persist units"
-on 'bash /home/root/paper-pure/device/pp-device.sh install'
+rc=0
+on 'bash /home/root/paper-pure/device/pp-device.sh install' || rc=$?
+case $rc in
+0) ;;
+255) # ssh's own failure: the link went away. pp-device outlives the session.
+    echo "ERROR   the SSH connection dropped during the install. pp-device keeps going on the tablet and logs to"
+    echo "        /home/root/paper-pure/device/install.log. Run device/install.sh again: it waits for that run, then finishes the job or confirms it."
+    exit 1 ;;
+*) echo "ERROR   pp-device install failed (exit $rc): its FAIL and ERROR lines above say why and what to do"; exit "$rc" ;;
+esac
 
 step "SSH still works on a fresh connection"
 for try in 1 2 3; do   # a new connection; a busy tablet can be slow to answer

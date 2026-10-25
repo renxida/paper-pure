@@ -6,19 +6,28 @@
 # /home and /data persistent volumes, the stock dropbear behind the stock
 # dev-mode check, and a fake boot ROM error counter (lpgpr) that survives
 # "reboots". A reboot is the container stopping and starting again.
+# It has no network at all (--network none), like the tablet in flight mode
+# until it is frozen (docs/runbook-bootstrap.md); SSH goes in through
+# `docker exec ... nc 127.0.0.1 22` to the stock dropbear behind a test
+# socket. Online, the stock updater fetched swupdate's config from memfaultd
+# and talked to reMarkable's real update server (hawkBit) from CI as a new
+# device each run; when it got an update, its failed install left
+# swu_status=3 and install rightly refused (runs 13, 14 and 16 on GitHub).
 #
 #   device/test/run.sh ROOTFS_DIR      ROOTFS_DIR: the extracted 3.27.2.2 root fs
 #                                      (never in the repo), used once for `docker import`
 #   PP_SLOW=1 device/test/run.sh ...   also the boot-loop scenarios (about 15 min)
 #   PP_KEEP=1                          leave the container running at the end
-#   PP_NAME=..., PP_PORT=...           container name (default pp-device-it), SSH port (3094)
+#   PP_NAME=...                        container name (default pp-device-it)
 #
 # Scenario 9 runs the real pp-agent with the mods lane's real hooks and
 # upstream's xovi/start and xovi/stock: triple-press toggle (KEY_POWER events
 # written into a FIFO the agent reads as its power key), reboot = stock, and
 # crash loops at install and at boot. Scenario 7 reinstalls over a
-# crash-looping memfaultd; scenario 10 boots with /home locked behind a
-# passcode, which only xochitl can ask for.
+# crash-looping memfaultd, through an SSH session cut after two lines;
+# scenario 10 boots with /home locked behind a passcode, which only xochitl
+# can ask for. Scenarios 1b and 1c are an OS update getting in first: install
+# refuses and changes nothing.
 #
 # Needs docker with arm64 emulation (binfmt), ssh, ssh-keygen, go (for
 # pp-proxy and the agent), git, python3.
@@ -31,7 +40,6 @@ REPO="$(cd "$HERE/../.." && pwd)"
 ROOTFS=${1:-}
 TAG=3.27.2.2
 C=${PP_NAME:-pp-device-it}
-PORT=${PP_PORT:-3094}
 WORK=${PP_WORK:-$(mktemp -d)}
 mkdir -p "$WORK"
 PASS=0 FAILN=0 FAILED=()
@@ -58,18 +66,22 @@ make -s -C "$REPO/agent" build > /dev/null   # the agent under test, fresh
 
 # ------------------------------------------------------------- keys, bins
 [ -f "$WORK/id" ] || ssh-keygen -q -t ed25519 -N '' -C pp-device-test -f "$WORK/id"
-SSHO=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=10)
+# No network in the test bed: ssh reaches its port 22 through docker exec.
+case $WORK in *[[:space:]]*) echo "PP_WORK must not contain spaces" >&2; exit 2 ;; esac
+printf '#!/bin/sh\nexec docker exec -i %s nc 127.0.0.1 22\n' "$C" > "$WORK/ssh-proxy"
+chmod +x "$WORK/ssh-proxy"
+SSHO=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=10 -o ProxyCommand="$WORK/ssh-proxy")
 export PP_SSH_OPTS="${SSHO[*]}"
 dev() { # ssh to the test bed; under qemu load sshd can miss the banner timeout, so retry that (exit 255)
     local i rc
     for i in 1 2 3; do
-        ssh "${SSHO[@]}" -i "$WORK/id" -p "$PORT" root@127.0.0.1 "$@" && return 0
+        ssh "${SSHO[@]}" -i "$WORK/id" root@127.0.0.1 "$@" && return 0
         rc=$?
         [ "$rc" = 255 ] && [ "$i" != 3 ] && running || return "$rc"
         sleep 2
     done
 }
-inst() { "$REPO/device/install.sh" -p "$PORT" -i "$WORK/id" --key "$WORK/id.pub" "$@" root@127.0.0.1; }
+inst() { "$REPO/device/install.sh" -i "$WORK/id" --key "$WORK/id.pub" "$@" root@127.0.0.1; }
 ota_state() { # the stock OTA stack's view: lpgpr's update flag, swupdate's server, its journal
     dev "n=${1:-25}; "'echo "swu_status=$(cat /sys/devices/platform/lpgpr/swu_status 2>&1) at $(date -u +%T)"
         sed -n "s/^ *url *= */swupdate server: /p" /tmp/swupdate.cfg 2>/dev/null
@@ -92,7 +104,7 @@ cleanup() {
 }
 # shellcheck disable=SC2317  # run by the EXIT trap
 on_exit() {
-    if [ "${PP_KEEP:-0}" = 1 ]; then echo "kept: container $C (ssh -p $PORT root@127.0.0.1, key $WORK/id)"; else cleanup; fi
+    if [ "${PP_KEEP:-0}" = 1 ]; then echo "kept: container $C (ssh -o ProxyCommand=$WORK/ssh-proxy -i $WORK/id root@127.0.0.1)"; else cleanup; fi
 }
 trap on_exit EXIT
 cleanup
@@ -143,7 +155,7 @@ docker create --name "$C" --platform linux/arm64 --cap-add SYS_ADMIN \
     --security-opt seccomp=unconfined --security-opt apparmor=unconfined --cgroupns=host \
     --read-only -t -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
     -v "$C-home:/home" -v "$C-data:/data" -v "$C-state:/pp-state" \
-    -p "127.0.0.1:$PORT:22" --stop-signal SIGRTMIN+3 "pp-device-testbed:$TAG" > /dev/null
+    --network none --stop-signal SIGRTMIN+3 "pp-device-testbed:$TAG" > /dev/null
 docker start "$C" > /dev/null
 w=0
 until docker exec "$C" test -d /home/root/.ssh 2> /dev/null; do
@@ -165,7 +177,53 @@ check "stock memfaultd was started this boot" dev '[ "$(systemctl show -P Inacti
 check "verify changed nothing on the tablet" dev '! test -e /home/root/paper-pure/device/managed.list'
 grep -E 'swu_status|update staged' <<< "$out" | sed 's/^/  stock verify: /' || true
 check "stock test bed: preflight passes (no OS update staged)" grep -q 'PASS    no OS update staged' <<< "$out"
+check "the test bed is offline, like the tablet in flight mode (no interface but lo)" dev '[ "$(ls /sys/class/net)" = lo ]'
 ota_state 8
+
+# The tablet left online can get an OS update before install runs, or while
+# it runs (both happened to the test bed on GitHub while it had a network).
+lp=/sys/devices/platform/lpgpr
+# shellcheck disable=SC2317  # called through check()
+untouched() { # nothing of ours live or in the root fs, / read-only, no bind left
+    dev 'r=0
+        test -e /home/root/paper-pure/device/managed.list && { echo "  managed.list exists"; r=1; }
+        awk '\''$2=="/"{o=$4} END{exit !(o ~ /^ro/)}'\'' /proc/mounts || { echo "  / is not read-only"; r=1; }
+        grep -q /run/pp-device/root /proc/mounts && { echo "  bind left behind"; r=1; }
+        mkdir -p /run/x && mount --bind / /run/x || exit 1
+        for v in / /run/x/; do
+            for u in swupdate.service update-engine.service dropbear-wlan.socket; do
+                if test -e ${v}etc/systemd/system/$u || test -L ${v}etc/systemd/system/$u; then echo "  $v: $u masked"; r=1; fi
+            done
+            grep -q "paper-pure freeze" ${v}etc/hosts && { echo "  $v: hosts block"; r=1; }
+        done
+        umount /run/x; exit $r'
+}
+t "1b. an update attempt failed before install (swu_status=3): install refuses and changes nothing"
+dev "echo 3 > $lp/swu_status"
+inst > "$WORK/1b-install-swu3.log" 2>&1 && rc=0 || rc=$?
+check "install exits 1" [ "$rc" = 1 ]
+check "it names the flag" grep -q 'FAIL    swu_status=3: the last OS update attempt failed' "$WORK/1b-install-swu3.log"
+check "it says what to do (flight mode, reboot, install again)" grep -q 'INFO    To go on: turn flight mode on, reboot' "$WORK/1b-install-swu3.log"
+check "it says nothing changed" grep -q 'ERROR   preflight failed; nothing changed' "$WORK/1b-install-swu3.log"
+check "nothing changed, live or in the root fs" untouched
+grep -q 'ERROR   preflight failed' "$WORK/1b-install-swu3.log" || install_diag "$WORK/1b-install-swu3.log"
+
+t "1c. an update was installing when install stopped the update services: install stops, root fs untouched"
+# Stand-in for an update in flight: stopping swupdate leaves swu_status=7,
+# as the stock updater does when it is cut off mid-install.
+dev "echo 0 > $lp/swu_status; mkdir -p /run/systemd/system/swupdate.service.d
+    printf '[Service]\nExecStopPost=/bin/sh -c \"echo 7 > $lp/swu_status\"\n' > /run/systemd/system/swupdate.service.d/zz-pptest-ota.conf
+    systemctl daemon-reload; systemctl start swupdate.service; echo \"  swupdate.service: \$(systemctl is-active swupdate.service)\""
+inst > "$WORK/1c-install-ota.log" 2>&1 && rc=0 || rc=$?
+check "install exits 1" [ "$rc" = 1 ]
+check "it saw the update the stop cut off" grep -q 'FAIL    swu_status=7 now: an OS update is being installed right now, or one was cut off' "$WORK/1c-install-ota.log"
+check "it says it stopped before changing anything in the root fs" grep -q 'ERROR   install stopped before changing anything in the root fs' "$WORK/1c-install-ota.log"
+check "nothing changed, live or in the root fs" untouched
+grep -q 'ERROR   install stopped before' "$WORK/1c-install-ota.log" || install_diag "$WORK/1c-install-ota.log"
+dev 'rm -f /run/systemd/system/swupdate.service.d/zz-pptest-ota.conf; systemctl daemon-reload'
+t "1d. what it said to do: reboot, and the stock updater clears the flag"
+reboot
+check "swu_status is 0 again once swupdate has started" dev "for i in \$(seq 1 40); do [ \"\$(cat $lp/swu_status)\" = 0 ] && exit 0; sleep 3; done; exit 1"
 
 t "2. install"
 inst > "$WORK/2-install.log" 2>&1 && rc=0 || rc=$?
@@ -230,7 +288,7 @@ check "verify catches a root-fs-only edit of /etc/hosts" grep -q "FAIL    /etc/h
 inst > "$WORK/5-repair.log" 2>&1 || install_diag "$WORK/5-repair.log"
 check "install repairs both" logto "$WORK/5-verify-repaired.log" inst --verify
 dev 'touch /data/internal/rm_enable_ssh_wifi_marker 2>/dev/null || { mkdir -p /data/internal; touch /data/internal/rm_enable_ssh_wifi_marker; }'
-check "verify catches the SSH-over-Wi-Fi marker" bash -c "! $(printf '%q ' "$REPO/device/install.sh" -p "$PORT" -i "$WORK/id" --verify root@127.0.0.1) > /dev/null 2>&1"
+check "verify catches the SSH-over-Wi-Fi marker" bash -c "! $(printf '%q ' "$REPO/device/install.sh" -i "$WORK/id" --verify root@127.0.0.1) > /dev/null 2>&1"
 inst > "$WORK/5-repair-marker.log" 2>&1
 check "install removes it" dev '! test -e /data/internal/rm_enable_ssh_wifi_marker'
 check "restore refuses a stock path pp-device never changed, and leaves it alone" dev '
@@ -273,7 +331,7 @@ check "pp-agent-tripletap started only after rm-sanity exited" dev '
     echo "rm-sanity exited at $s us, pp-agent-tripletap started at $b us"; [ "$s" -gt 0 ] && [ "$b" -gt "$s" ]'
 
 t "7. uninstall puts the root fs back to stock; reinstall over a crash-looping memfaultd"
-"$REPO/device/install.sh" -p "$PORT" -i "$WORK/id" --uninstall root@127.0.0.1 > "$WORK/7-uninstall.log" 2>&1
+"$REPO/device/install.sh" -i "$WORK/id" --uninstall root@127.0.0.1 > "$WORK/7-uninstall.log" 2>&1
 # Next boot: stock memfaultd is back, and here it crash-loops as fast as it
 # can (boot.sh). A daemon-reload landing on its pending restart right after
 # the mask once aborted systemd's PID 1; install now stops it first.
@@ -289,9 +347,14 @@ check "pp-agent-tripletap no longer enabled" dev '! test -e /etc/systemd/system/
 check "memfaultd is crash-looping before the reinstall" dev '
     a=$(systemctl show -P NRestarts memfaultd.service); sleep 10; b=$(systemctl show -P NRestarts memfaultd.service)
     echo "  memfaultd restarts: $a, 10 s later $b"; [ "$b" -gt "$a" ]'
-inst > "$WORK/7-reinstall.log" 2>&1 && rc=0 || rc=$?
-check "reinstall over the crash loop exits 0" [ "$rc" = 0 ]
-[ "$rc" = 0 ] || install_diag "$WORK/7-reinstall.log"
+# The reinstall's terminal goes away after two lines (USB unplugged, laptop
+# asleep): every later write hits a closed pipe, as when dropbear's channel
+# closes. pp-device used to die there of SIGPIPE, half-way, silently. It must
+# run to the end, and its log on /home must say so.
+dev 'bash /home/root/paper-pure/device/pp-device.sh install | head -n 2' > "$WORK/7-reinstall-cut.log" 2>&1 || true
+dev 'cat /home/root/paper-pure/device/install.log' > "$WORK/7-reinstall.log" 2>&1 || true
+check "reinstall over the crash loop, its output cut after 2 lines, ran to the end" grep -q 'pp-device: all checks passed' "$WORK/7-reinstall.log"
+grep -q 'pp-device: all checks passed' "$WORK/7-reinstall.log" || install_diag "$WORK/7-reinstall.log"
 check "the test bed stayed up (PID 1 survived the mask and reload)" alive
 check "memfaultd was stopped before it was masked (inactive, not failed)" dev '
     s=$(systemctl is-active memfaultd.service); e=$(systemctl is-enabled memfaultd.service); echo "  memfaultd: $s, $e"

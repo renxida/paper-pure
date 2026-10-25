@@ -41,12 +41,18 @@ AGENT_UNITS="pp-agent-boot.service pp-agent.service pp-agent.timer pp-agent-trip
 # for rm-sanity (wait-sanity.conf).
 WAIT_UNITS="pp-agent-boot.service pp-agent-tripletap.service pp-agent.service"
 
-FAILS=0
-say()  { printf '%-7s %s\n' "$1" "$2"; }
+FAILS=0 CHANGES=0
+# Output. For the commands that change things, a copy goes to $LOG on /home
+# ($DEV/install.log, ...), and losing the terminal (USB unplugged, laptop
+# asleep) must not stop us half-way: stdout may be gone, so writing to it
+# never fails (main ignores SIGHUP and SIGPIPE for those commands).
+LOG=""
+out()  { if [ -n "$LOG" ]; then printf '%s\n' "$*" >> "$LOG" 2> /dev/null || true; fi; printf '%s\n' "$*" 2> /dev/null || true; }
+say()  { out "$(printf '%-7s %s' "$1" "$2")"; }
 pass() { say PASS "$1"; }
 fail() { say FAIL "$1"; FAILS=$((FAILS + 1)); }
 info() { say INFO "$1"; }
-chg()  { say CHANGE "$1"; }
+chg()  { say CHANGE "$1"; CHANGES=$((CHANGES + 1)); }
 die()  { say ERROR "$1" >&2; exit 1; }
 have_systemd() { [ -d /run/systemd/system ] && [ "$(cat /proc/1/comm 2>/dev/null)" = systemd ]; }
 
@@ -57,6 +63,7 @@ ROOT_WAS_RO=""
 root_is_ro() { awk '$2 == "/" { o = $4 } END { exit !(o ~ /^ro(,|$)/) }' /proc/mounts; }
 real_open() { # rw|ro
     [ -n "$REAL_OPEN" ] && return 0
+    REAL_OPEN=$1   # first: from here on real_close undoes whatever this did (a failed bind must not leave / rw)
     if [ "$1" = rw ] && root_is_ro; then
         mount -o remount,rw / || die "cannot remount / read-write (is developer mode on?)"
         ROOT_WAS_RO=1
@@ -66,7 +73,6 @@ real_open() { # rw|ro
         mountpoint -q "$BIND" || mount --bind / "$BIND"
         REAL=$BIND
     fi
-    REAL_OPEN=$1
 }
 real_close() {
     [ -n "$REAL_OPEN" ] || return 0
@@ -79,7 +85,23 @@ real_close() {
     fi
     REAL="" REAL_OPEN="" ROOT_WAS_RO=""
 }
-trap real_close EXIT
+# install's phase, for the exit report: "" (nothing touched yet), writing
+# (update services stopped, root fs being written), written (and closed).
+PHASE=""
+on_exit() {
+    local rc=$?
+    real_close
+    [ "$rc" != 0 ] || return 0
+    case $PHASE in
+    writing)
+        if [ "$CHANGES" = 0 ]; then
+            say ERROR "install stopped before changing anything in the root fs. The update services it stopped stay stopped until the next reboot; nothing else changed."
+        else
+            say ERROR "INCOMPLETE: install stopped after $CHANGES change(s) (the CHANGE lines above${LOG:+, and $LOG}). The freeze comes first and our units after it, and each change is safe on its own, but the install is not finished: run device/install.sh again to finish it, or --uninstall to go back to stock."
+        fi ;;
+    esac
+}
+trap on_exit EXIT
 
 # One path, both views. backup_once must run before the first write.
 backup_once() {
@@ -208,7 +230,7 @@ preflight() { # strict before install; reports only in verify
         if [ -r "$LPGPR/swu_status" ]; then
             swu=$(cat "$LPGPR/swu_status")
             if [ "$swu" = 0 ]; then pass "no OS update staged (swu_status=0)"
-            else fail "swu_status=$swu: an OS update was installed or interrupted (1 installed, 3 failed, 7 in progress)"; fi
+            else fail "swu_status=$swu: $(swu_says "$swu")"; info "$(swu_todo "$swu")"; fi
         else
             info "swu_status not readable here"
         fi
@@ -216,8 +238,42 @@ preflight() { # strict before install; reports only in verify
     else
         info "no $LPGPR: not a real tablet (emulator or test bed), slot checks skipped"
     fi
+    [ "$mode" = install ] && check_inputs
     if [ "$mode" = install ] && [ "$FAILS" -gt 0 ]; then die "preflight failed; nothing changed"; fi
     return 0
+}
+check_inputs() { # everything install will copy or run, before it changes anything
+    local f u
+    for f in freeze.hosts wait-sanity.conf wait-sanity.sh; do [ -s "$HERE/$f" ] || fail "$HERE/$f missing (copy device/tablet/ again)"; done
+    if [ -x "$PP/bin/pp-agent" ]; then
+        for u in $AGENT_UNITS; do [ -f "$PP/systemd/$u" ] || fail "$PP/systemd/$u missing (run agent/install.sh first)"; done
+    fi
+    if [ -x "$PP/bin/pp-proxy" ]; then
+        [ -f "$PP/systemd/pp-proxy.service" ] || [ -f /run/systemd/system/pp-proxy.service ] || fail "pp-proxy.service not found (run server/tablet-proxy/install.sh --runtime first)"
+        [ -f "$PP/proxy/ca.crt" ] || fail "$PP/proxy/ca.crt missing (pp-proxy gencert)"
+        [ -n "$("$PP/bin/pp-proxy" hosts 2> /dev/null)" ] || fail "'pp-proxy hosts' gives no hosts block"
+    fi
+    return 0
+}
+# lpgpr's swu_status, as the stock updater sets it (/usr/lib/swupdate/conf.d/
+# 09-swupdate-args): 0 ok, 1 installed, 3 failed, 7 in progress. swupdate
+# resets it to 0 every time it starts, i.e. at every boot while unfrozen. At
+# a reboot, rm-apply-ota.service switches to the other slot if it is 1.
+swu_says() {
+    case $1 in
+    1) echo "an OS update is installed and waits for the next reboot" ;;
+    3) echo "the last OS update attempt failed (nothing is staged)" ;;
+    7) echo "an OS update is being installed right now, or one was cut off" ;;
+    *) echo "unknown update state (0 ok, 1 installed, 3 failed, 7 in progress)" ;;
+    esac
+}
+swu_todo() {
+    case $1 in
+    1) echo "Don't reboot: the next boot would run the new OS, without our freeze. Stop and decide with Claude (going back is a boot-slot change)." ;;
+    3) echo "To go on: turn flight mode on, reboot (the stock updater clears this flag when it starts), then run install again." ;;
+    7) echo "To go on: turn flight mode on, wait a minute, run install again. If it still says 7, or now 3, reboot first (an unfinished update does not switch slots); if it says 1, stop and decide with Claude." ;;
+    *) echo "Stop and decide with Claude." ;;
+    esac
 }
 slot_checks() {
     local part next a other dev ver mnt
@@ -319,10 +375,11 @@ step_proxy() {
 }
 
 cmd_install() {
-    echo "pp-device install ($(os_version), $(date -u +%FT%TZ))"
+    out "pp-device install ($(os_version), $(date -u +%FT%TZ))"
     preflight install
     step_files
-    local u
+    local u s
+    PHASE=writing
     # Stop before masking: a daemon-reload that lands on a pending restart of
     # a now-masked unit (memfaultd crash-looping) aborted systemd 255's PID 1
     # in the test bed, and on the tablet PID 1 dying means a reboot.
@@ -330,12 +387,21 @@ cmd_install() {
         for u in $UPDATE_UNITS $SSH_UNITS; do systemctl stop "$u" 2>/dev/null || true; done
         for u in $UPDATE_UNITS $SSH_UNITS; do systemctl reset-failed "$u" 2>/dev/null || true; done
     fi
+    # An update that started after preflight (tablet online) and was still
+    # running when we stopped it: swu_status says so now. Freezing then would
+    # keep a slot that an installed update would leave at the next reboot.
+    if [ -r "$LPGPR/swu_status" ] && s=$(cat "$LPGPR/swu_status") && [ "$s" != 0 ]; then
+        fail "swu_status=$s now: $(swu_says "$s"), while install stopped the update services"
+        info "$(swu_todo "$s")"
+        exit 1
+    fi
     real_open rw
     for u in $UPDATE_UNITS $SSH_UNITS; do set_link "$SYSD/$u" /dev/null; done
     set_hosts_block "paper-pure freeze" "$HERE/freeze.hosts"
     step_agent
     step_proxy
     real_close
+    PHASE=written
     if [ -e "$WIFI_SSH_MARKER" ]; then rm -f "$WIFI_SSH_MARKER"; chg "removed $WIFI_SSH_MARKER (SSH over Wi-Fi off)"; fi
     if have_systemd; then
         systemctl daemon-reload
@@ -343,13 +409,13 @@ cmd_install() {
         [ -f "$SYSD/pp-agent-tripletap.service" ] && systemctl start pp-agent-tripletap.service
         [ -f "$SYSD/pp-proxy.service" ] && { systemctl is-active -q pp-proxy.service || systemctl start pp-proxy.service; }
     fi
-    echo
+    out ""
     FAILS=0
     cmd_verify
 }
 
 cmd_verify() {
-    echo "pp-device verify ($(date -u +%FT%TZ))"
+    out "pp-device verify ($(date -u +%FT%TZ))"
     preflight verify
     real_open ro
     local u n a
@@ -415,8 +481,8 @@ cmd_verify() {
     # Everything we persisted is the same live and in the root fs.
     check_managed
     real_close
-    echo
-    if [ "$FAILS" = 0 ]; then echo "pp-device: all checks passed"; else echo "pp-device: $FAILS check(s) failed"; fi
+    out ""
+    if [ "$FAILS" = 0 ]; then out "pp-device: all checks passed"; else out "pp-device: $FAILS check(s) failed"; fi
     [ "$FAILS" = 0 ]
 }
 check_hosts_block() { # name blockfile
@@ -441,7 +507,7 @@ check_managed() {
 }
 
 cmd_uninstall() {
-    echo "pp-device uninstall"
+    out "pp-device uninstall ($(date -u +%FT%TZ))"
     [ -f "$MANAGED" ] || { info "nothing to undo"; return 0; }
     real_open rw
     local p
@@ -468,10 +534,23 @@ wait_booted() {
 
 main() {
     [ "$(id -u)" = 0 ] || die "run as root"
+    local changes=""
+    case "${1:-}" in install | uninstall | persist | restore) changes=1 ;; esac
+    # These run to the end even if the SSH session goes away (the stock
+    # dropbear units have KillMode=process, so we outlive it).
+    [ -z "$changes" ] || trap '' HUP PIPE
     wait_booted
     mkdir -p "$DEV" /run/pp-device
     exec 9> /run/pp-device/lock
-    flock -n 9 || die "another pp-device is running"
+    # A run whose session dropped may still be finishing: give it a minute.
+    # (busybox flock: no -w)
+    local i
+    for i in $(seq 1 30); do
+        flock -n 9 && break
+        [ "$i" != 30 ] || die "another pp-device run is still going (install's log: $DEV/install.log); try again in a minute"
+        sleep 2
+    done
+    if [ -n "$changes" ]; then LOG=$DEV/$1.log; { : > "$LOG"; } 2> /dev/null || LOG=""; fi
     case "${1:-}" in
     install) cmd_install ;;
     verify) cmd_verify ;;
