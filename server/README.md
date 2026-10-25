@@ -17,7 +17,7 @@ tablet ──────────┘ Access: service token  ──> Tunnel �
 - **Cloudflare Access is the gate for everything.** One Access app on `pp.<domain>`: Cedar logs in; the tablet, CI and Claude each have their own service token, revocable alone. Behind it, rmfakecloud's own logins still apply.
 - **The feed is untrusted.** `pp-agent` installs only releases signed with Cedar's key, so a compromised server can't push code. ppd adds one rule of its own: publishing needs `PP_PUBLISH_TOKEN`, which only CI has.
 - **The tablet** sends its token from `agent.json`. `pp-agent` does it directly. Stock sync can't add headers, so `pp-proxy` on the tablet does it for them. See [tablet-proxy/README.md](tablet-proxy/README.md).
-- **Host:** Render, a background worker with a 5 GB disk. See [hosting.md](hosting.md).
+- **Host (recommended, Cedar decides):** Render, a background worker with a 5 GB disk. See [hosting.md](hosting.md).
 
 ## ppd endpoints
 
