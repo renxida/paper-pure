@@ -34,7 +34,17 @@ PASS=0
 step() { printf '\n== %s\n' "$*"; }
 ok()   { PASS=$((PASS + 1)); echo "  ok: $*"; }
 die()  { echo "  FAIL: $*" >&2; echo "  workdir kept: $W" >&2; exit 1; }
-cleanup() { docker rm -f "$NAME" >/dev/null 2>&1 || true; }
+# The container runs as root (like the tablet) and writes into the bind
+# mounts. When the host user is not root (GitHub's runner), it cannot delete
+# those files, so hand them back first, through docker. Never fails.
+cleanup() {
+    local me; me="$(id -u):$(id -g)"
+    if [ -n "$(find "$W" ! -user "$(id -u)" -print -quit 2>/dev/null)" ]; then
+        docker exec "$NAME" chown -R "$me" /home/root /fake /feed >/dev/null 2>&1 ||
+            docker run --rm --platform linux/arm64 -v "$W:/w" "$IMAGE" chown -R "$me" /w >/dev/null 2>&1 || true
+    fi
+    docker rm -f "$NAME" >/dev/null 2>&1 || true
+}
 trap cleanup EXIT
 
 P="$W/home/paper-pure"   # host view of /home/root/paper-pure
@@ -286,4 +296,6 @@ has "agent log" "$(cat "$P/state/agent.log")" "tripletap: mods on (good4)"
 has "reset-failed before hooks" "$(cat "$W/fake/systemctl.log")" "reset-failed xochitl.service"
 
 printf '\nPASS: %d checks (image %s)\n' "$PASS" "$IMAGE"
-[ -n "${PP_WORK:-}" ] || rm -rf "$W"
+cleanup; trap - EXIT
+# Tidying up never fails a run that passed.
+if [ -z "${PP_WORK:-}" ]; then rm -rf "$W" 2>/dev/null || echo "  (could not remove $W)"; fi

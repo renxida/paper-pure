@@ -29,13 +29,32 @@ ifeq ($(origin RELEASE_ID),undefined)
 RELEASE_ID := $(shell date -u +%Y%m%d-%H%M%S)-$(shell git rev-parse --short=7 HEAD 2>/dev/null || echo nogit)$(shell git diff --quiet HEAD 2>/dev/null || echo -dirty)
 endif
 
-# Recipe prelude. step NAME CMD...: CMD's output goes to $L/NAME.log, the
-# verdict to one PASS/FAIL line (plus the log's tail on failure); returns
-# CMD's status. summary: all the lines again, then exit 1 if any failed.
-STEP = L=$(LOGS)/$@; rm -rf "$$L"; mkdir -p "$$L"; : > "$$L/summary"; \
-  step() { local n=$$1 t=$$SECONDS r=PASS; shift; "$$@" > "$$L/$$n.log" 2>&1 || r=FAIL; \
-    printf '%s  %-18s %5ss  %s\n' "$$r" "$$n" "$$((SECONDS - t))" "$$L/$$n.log" | tee -a "$$L/summary"; \
-    [ $$r = PASS ] || { tail -n 40 "$$L/$$n.log" | sed 's/^/      | /'; return 1; }; }; \
+# Time limits, so a hang fails one step instead of eating the CI job. Proofs
+# and rung2 run arm64 code: natively on arm64 (CI), about 4x slower under
+# qemu elsewhere, so their limits scale by QEMU. The proofs job's
+# timeout-minutes in ci.yml must stay above the sum of the proofs' limits.
+QEMU := $(if $(filter aarch64 arm64,$(shell uname -m)),1,4)
+STEP_LIMIT := 1200
+
+# Recipe prelude.
+# limit SECS CMD...: CMD in its own process group; after SECS it and all it
+#   started get TERM (KILL 30 s later), exit 124/137. Ctrl-C still reaches it.
+# step [-t SECS] NAME CMD...: CMD's output goes to $L/NAME.log, a "...." line
+#   every minute while it runs (with the log's last line), then one PASS/FAIL
+#   line, plus the log's tail on failure; returns CMD's status. Default limit
+#   STEP_LIMIT. summary: all the lines again, then exit 1 if any failed.
+LIMIT = limit() { local s=$$1 p rc=0; shift; timeout -k 30 "$$s" "$$@" & p=$$!; \
+    trap "kill -INT -- -$$p 2> /dev/null; wait $$p; exit 130" INT TERM; \
+    wait "$$p" || rc=$$?; trap - INT TERM; return "$$rc"; }
+STEP = L=$(LOGS)/$@; rm -rf "$$L"; mkdir -p "$$L"; : > "$$L/summary"; $(LIMIT); \
+  step() { local s=$(STEP_LIMIT) n t=$$SECONDS r=PASS rc=0 hb why=; [ "$$1" != -t ] || { s=$$2; shift 2; }; \
+    n=$$1; shift; printf '....  %-18s start (limit %ss)\n' "$$n" "$$s"; \
+    { while sleep 60 > /dev/null 2>&1 && kill -0 $$$$ 2> /dev/null; do printf '....  %-18s %5ss  %s\n' "$$n" "$$((SECONDS - t))" \
+        "$$(tail -n 1 "$$L/$$n.log" 2> /dev/null | tr -d '\r' | cut -c1-110)"; done; } & hb=$$!; \
+    limit "$$s" "$$@" > "$$L/$$n.log" 2>&1 || rc=$$?; kill "$$hb" 2> /dev/null; \
+    case $$rc in 0) ;; 124|137) r=FAIL why=" TIMEOUT after $${s}s" ;; *) r=FAIL ;; esac; \
+    printf '%s  %-18s %5ss  %s%s\n' "$$r" "$$n" "$$((SECONDS - t))" "$$L/$$n.log" "$$why" | tee -a "$$L/summary"; \
+    [ $$r = PASS ] || { tail -n 80 "$$L/$$n.log" | sed 's/^/      | /'; return 1; }; }; \
   summary() { local f; f=$$(grep -c '^FAIL' "$$L/summary" || true); echo; cat "$$L/summary"; \
     echo "== $@: $$(grep -c '^PASS' "$$L/summary" || true) passed, $$f failed (logs in $$L)"; [ "$$f" = 0 ]; }; \
   need() { local t m=; for t; do command -v "$$t" > /dev/null || m="$$m $$t"; done; \
@@ -84,12 +103,12 @@ build-arm64:
 
 # ---------------------------------------------------------------- proofs
 proofs: | $(OUT)/.gitignore
-	@$(STEP); need docker go python3 ssh ssh-keygen git curl; \
-	step rootfs            $(MAKE) rootfs && { \
-	step agent-integration env PP_IMAGE=pp-agent-tatsu-rootfs:$(PP_OS) $(MAKE) -C agent integration; \
-	step server-proof      $(MAKE) -C server proof; \
-	step wishes-proof      $(MAKE) -C tools/wishes proof; \
-	step device-testbed    device/test/run.sh; }; \
+	@$(STEP); need docker go python3 ssh ssh-keygen git curl timeout; q=$(QEMU); \
+	step -t $$((10 * 60 * q)) rootfs            $(MAKE) rootfs && { \
+	step -t $$((8  * 60 * q)) agent-integration env PP_IMAGE=pp-agent-tatsu-rootfs:$(PP_OS) $(MAKE) -C agent integration; \
+	step -t $$((15 * 60 * q)) server-proof      $(MAKE) -C server proof; \
+	step -t $$((8  * 60 * q)) wishes-proof      $(MAKE) -C tools/wishes proof; \
+	step -t $$((25 * 60 * q)) device-testbed    device/test/run.sh; }; \
 	summary
 
 # reMarkable's firmware, for local use only: never committed, never uploaded.
@@ -118,9 +137,12 @@ rootfs:
 	echo "rootfs: pp-emu-rootfs, pp-device-rootfs, pp-agent-tatsu-rootfs at $(PP_OS)"
 
 # ---------------------------------------------------------------- rung 2
+# Limit: 75 min natively (the rung2 job allows 90), 4x that under qemu.
 rung2: | $(OUT)/.gitignore
 	@[ -x test/e2e/run.sh ] || { echo "rung2: test/e2e/run.sh is missing" >&2; exit 1; }; \
-	mkdir -p $(LOGS); set -o pipefail; test/e2e/run.sh $(E2E_ARGS) 2>&1 | tee $(LOGS)/rung2.log
+	mkdir -p $(LOGS); set -o pipefail; $(LIMIT); s=$$((75 * 60 * $(QEMU))); rc=0; \
+	limit "$$s" test/e2e/run.sh $(E2E_ARGS) 2>&1 | tee $(LOGS)/rung2.log || rc=$$?; \
+	case $$rc in 124|137) echo "rung2: FAIL, TIMEOUT after $${s}s (log $(LOGS)/rung2.log)" ;; esac; exit $$rc
 
 loop:
 	@t=$$SECONDS; r=FAIL; \
@@ -135,7 +157,7 @@ release: | $(OUT)/.gitignore
 	@$(STEP); need docker go git openssl curl readelf; rm -rf $(OUT)/feed; \
 	echo "release $(RELEASE_ID) for OS $(PP_OS)"; \
 	{ step rootfs     $(MAKE) rootfs && \
-	  step mods-build env RELEASE_ID=$(RELEASE_ID) mods/build.sh && \
+	  step -t $$((30 * 60 * $(QEMU))) mods-build env RELEASE_ID=$(RELEASE_ID) mods/build.sh && \
 	  step ppsign     $(MAKE) -C agent build && \
 	  step pack       $(MAKE) pack ID=$(RELEASE_ID); }; \
 	summary && if [ -f $(OUT)/feed/release-id ]; then \

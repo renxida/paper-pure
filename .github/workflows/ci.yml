@@ -40,7 +40,7 @@ jobs:
       - run: make rung1
       - if: always()
         run: f=out/logs/rung1/summary; [ ! -f $f ] || { echo '```'; cat $f; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
-      - if: failure()
+      - if: failure() || cancelled()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: rung1-logs
@@ -50,10 +50,13 @@ jobs:
 
   # Cheapest first: the arm64 jobs start only once rung1 is green.
   # Component proofs in arm64 containers. Native arm64: no qemu.
+  # GitHub's runners run as user `runner`, not root: see docs/ci.md.
   proofs:
     needs: rung1
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 60
+    # Above the sum of the proofs' own limits in the Makefile (66 min), so a
+    # hang fails one step and the rest still report.
+    timeout-minutes: 80
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -67,7 +70,9 @@ jobs:
           python-version: '3.13'
       - name: Docker and disk
         run: |
+          echo "user $(id -un) ($(id -u)), groups: $(id -Gn)"
           docker version --format 'docker {{.Server.Version}} {{.Server.Os}}/{{.Server.Arch}}'
+          docker info --format 'cgroup v{{.CgroupVersion}} ({{.CgroupDriver}}), security: {{join .SecurityOptions ", "}}'
           docker buildx version
           docker compose version
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
@@ -76,7 +81,7 @@ jobs:
       - run: make proofs
       - if: always()
         run: f=out/logs/proofs/summary; [ ! -f $f ] || { echo '```'; cat $f; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
-      - if: failure()
+      - if: failure() || cancelled()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: proofs-logs
@@ -88,7 +93,7 @@ jobs:
   rung2:
     needs: rung1
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 90
+    timeout-minutes: 90   # above rung2's own limit in the Makefile (75 min)
     env:
       PP_E2E_OUT: test/e2e/out
     steps:
@@ -107,7 +112,9 @@ jobs:
           python-version: '3.13'
       - name: Docker and disk
         run: |
+          echo "user $(id -un) ($(id -u)), groups: $(id -Gn)"
           docker version --format 'docker {{.Server.Version}} {{.Server.Os}}/{{.Server.Arch}}'
+          docker info --format 'cgroup v{{.CgroupVersion}} ({{.CgroupDriver}}), security: {{join .SecurityOptions ", "}}'
           docker buildx version
           docker compose version
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
@@ -127,7 +134,7 @@ jobs:
             !${{ env.PP_E2E_OUT }}/**/*.jpg
           retention-days: 7
           if-no-files-found: ignore
-      - if: failure()
+      - if: failure() || cancelled()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: rung2-logs-and-screenshots

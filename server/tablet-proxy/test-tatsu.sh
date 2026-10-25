@@ -18,7 +18,10 @@ NAME="pp-server-tatsu-$$"
 PASS=0
 ok()  { PASS=$((PASS + 1)); echo "  ok: $*"; }
 die() { echo "  FAIL: $*" >&2; exit 1; }
-cleanup() { docker rm -f "$NAME" >/dev/null 2>&1 || true; }
+cleanup() { # hand root's files in the bind mount back to the host user (not root on CI), then go
+    docker exec "$NAME" chown -R "$(id -u):$(id -g)" /home/root >/dev/null 2>&1 || true
+    docker rm -f "$NAME" >/dev/null 2>&1 || true
+}
 trap cleanup EXIT
 dx() { docker exec "$NAME" "$@"; }
 
@@ -63,11 +66,13 @@ has() { case "$2" in *"$3"*) ok "$1 has: $3" ;; *) die "$1: missing '$3' in: $2"
 has "install.sh --runtime (2nd run)" "$out" "installed (--runtime)"
 has "pp-proxy check through the gate" "$out" "200 OK"
 eq "files gencert wrote (no CA key)" "$(dx sh -c 'ls /home/root/paper-pure/proxy | tr "\n" " "')" "ca.crt cert.pem key.pem "
-eq "CA in the system bundle (after 2 runs)" "$(dx grep -c "$(sed -n 2p "$W/home/paper-pure/proxy/ca.crt")" /etc/ssl/certs/ca-certificates.crt)" 1
+# Read what the container wrote from inside it: proxy/ is root's 0700, and
+# the host user is not root on CI.
+eq "CA in the system bundle (after 2 runs)" "$(dx grep -c "$(dx sed -n 2p /home/root/paper-pure/proxy/ca.crt)" /etc/ssl/certs/ca-certificates.crt)" 1
 eq "cloud names in /etc/hosts (after 2 runs)" "$(dx grep -c '^127.0.0.1 .*\(remarkable\|appspot\)' /etc/hosts)" 13
 eq "unit" "$(dx ls /run/systemd/system/pp-proxy.service)" /run/systemd/system/pp-proxy.service
 eq "systemctl calls" "$(dx sort -u /tmp/systemctl.log | tr '\n' ',')" "daemon-reload,reset-failed xochitl.service,restart pp-proxy.service,start xochitl.service,stop xochitl.service,"
-eq "notes marked not synced" "$(grep -c '"synced": false' "$W/home/.local/share/remarkable/xochitl/proof.metadata")" 1
+eq "notes marked not synced" "$(dx grep -c '"synced": false' /home/root/.local/share/remarkable/xochitl/proof.metadata)" 1
 # The persistent install trusts the CA with the tablet's own tool instead.
 out=$(dx sh -c 'mkdir -p /usr/local/share/ca-certificates && cp /home/root/paper-pure/proxy/ca.crt /usr/local/share/ca-certificates/pp-proxy.crt && update-ca-certificates 2>&1')
 case "$out" in *"1 added"*) ok "update-ca-certificates (persist path): 1 added" ;; *) die "update-ca-certificates: $out" ;; esac

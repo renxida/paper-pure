@@ -252,3 +252,6 @@ eq "containers left" "$(docker ps -a --filter "name=^${P}" --filter name=pp-serv
 eq "volumes left" "$(docker volume ls -q --filter "name=^${P}_" | wc -l | tr -d ' ')" 0
 echo
 echo "PASS $PASS"
+# Tidying up never fails a run that passed (test-tatsu.sh hands back what
+# its container wrote as root).
+if [ -z "${PP_WORK:-}" ]; then rm -rf "$W" 2>/dev/null || echo "  (could not remove $W)"; fi

@@ -78,6 +78,10 @@ on_exit() {
 trap on_exit EXIT
 cleanup
 running() { [ "$(docker inspect -f '{{.State.Running}}' "$C" 2>/dev/null)" = true ]; }
+diag() { # why the test bed is not up: its state, then its console (boot.sh and systemd log there)
+    echo "  test bed: $(docker inspect -f '{{.State.Status}}, exit {{.State.ExitCode}} {{.State.Error}}' "$C" 2>&1)"
+    docker logs --tail 80 "$C" 2>&1 | tr -d '\r' | sed 's/^/    console| /'
+}
 # shellcheck disable=SC2317  # called through check()
 alive() { # for checks that need the tablet up: say so if it went down on its own
     running && return 0
@@ -94,11 +98,14 @@ boot() { # start the container and wait for systemd to settle and SSH to answer
     # Also past "initializing" (basic.target): before it the /etc overlay
     # and the /etc/dropbear bind may not be up, and an install then breaks SSH.
     until st=$(docker exec "$C" systemctl is-system-running 2> /dev/null; true); [ "$st" != initializing ] && [ "$(docker exec "$C" systemctl is-active xochitl.service 2> /dev/null)" = active ]; do
-        [ $(($(date +%s) - start)) -lt 400 ] || { echo "  boot: xochitl not up after 400 s (systemd: $st)"; return 1; }
-        running || { echo "  boot: container stopped"; return 1; }
+        [ $(($(date +%s) - start)) -lt 400 ] || { echo "  boot: xochitl not up after 400 s (systemd: $st)"; diag; return 1; }
+        running || { echo "  boot: container stopped"; diag; return 1; }
         sleep 3
     done
-    until dev true 2> /dev/null; do sleep 2; done
+    until dev true 2> /dev/null; do
+        [ $(($(date +%s) - start)) -lt 520 ] || { echo "  boot: no SSH after $(($(date +%s) - start)) s"; diag; return 1; }
+        sleep 2
+    done
     echo "  booted in $(($(date +%s) - start)) s ($st)"
 }
 reboot() { # clean reboot, the way `systemctl reboot` on the tablet does it
@@ -107,12 +114,23 @@ reboot() { # clean reboot, the way `systemctl reboot` on the tablet does it
     while running; do [ $(($(date +%s) - start)) -lt 120 ] || docker stop -t 5 "$C" > /dev/null; sleep 2; done
     boot
 }
-docker create --name "$C" --platform linux/arm64 --cap-add SYS_ADMIN --security-opt seccomp=unconfined \
+# systemd as PID 1 in docker, on any host: boot.sh mounts (AppArmor's
+# docker-default profile denies mount even with SYS_ADMIN, hence unconfined),
+# and systemd runs its own subtree of the host's cgroup tree (host cgroup
+# namespace: on cgroup v2 docker's default private one would show it the
+# host's root through the rw bind mount, which it can't use).
+echo "  docker $(docker version -f '{{.Server.Version}}' 2>&1), $(docker info -f 'cgroup v{{.CgroupVersion}} ({{.CgroupDriver}}), {{join .SecurityOptions " "}}' 2>&1)"
+docker create --name "$C" --platform linux/arm64 --cap-add SYS_ADMIN \
+    --security-opt seccomp=unconfined --security-opt apparmor=unconfined --cgroupns=host \
     --read-only -t -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
     -v "$C-home:/home" -v "$C-data:/data" -v "$C-state:/pp-state" \
     -p "127.0.0.1:$PORT:22" --stop-signal SIGRTMIN+3 "pp-device-testbed:$TAG" > /dev/null
 docker start "$C" > /dev/null
-until docker exec "$C" test -d /home/root/.ssh 2> /dev/null; do sleep 1; done
+w=0
+until docker exec "$C" test -d /home/root/.ssh 2> /dev/null; do
+    if ! running || [ $((w += 1)) -ge 300 ]; then echo "  first boot: test bed not up after $w s"; diag; exit 1; fi
+    sleep 1
+done
 docker exec -i "$C" sh -c 'cat > /home/root/.ssh/authorized_keys; chmod 600 /home/root/.ssh/authorized_keys' < "$WORK/id.pub"
 docker stop -t 5 "$C" > /dev/null 2>&1 || true
 boot
