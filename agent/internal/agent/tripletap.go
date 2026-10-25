@@ -41,7 +41,7 @@ func (a *Agent) Toggle(ctx context.Context) error {
 		busy = true
 		if pid := a.lockHolder(); pid > 0 && pid != os.Getpid() {
 			a.logf("toggle: pp-agent pid %d is busy, stopping it", pid)
-			_ = syscall.Kill
+			syscall.Kill(pid, syscall.SIGTERM)
 		}
 		if err := a.lock(true); err != nil {
 			return err
