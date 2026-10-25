@@ -64,7 +64,7 @@ static void setup(void) {
     BIT(d->prop, INPUT_PROP_DIRECT);
 
     d = &devs[DEV_BUTTONS];
-    d->name = "30370000.snvs:snvs-powerkey";
+    d->name = "44440000.bbnsm:pwrkey";  // tatsu: /etc/pm/sleep.wakesrc in the rootfs
     d->id = (struct input_id){ BUS_HOST, 0, 0, 0 };
     BIT(d->ev, EV_SYN); BIT(d->ev, EV_KEY);
     BIT(d->key, KEY_POWER);

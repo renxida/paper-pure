@@ -32,6 +32,11 @@ static long screen_bpl;
 static int screen_fmt, screen_bpp;
 static unsigned char *shadow;   // raw bytes rmemud last got (W * bpp per row)
 static volatile int poke;       // set on display activity; makes the scanner look now
+// The screen memory is SWTCON's and goes away when xochitl exits. The scanner
+// only reads it under this lock, and stops once the QImage around it is gone
+// (reading unmapped memory there made xochitl segfault on about one stop in three).
+static pthread_mutex_t screen_lock = PTHREAD_MUTEX_INITIALIZER;
+static const void *screen_img;  // the QImage object wrapping it
 
 // QImage::Format values (Qt 6) we know how to read.
 enum { F_RGB32 = 4, F_ARGB32 = 5, F_ARGB32P = 6, F_RGB16 = 7, F_RGBX8888 = 16, F_RGBA8888 = 17,
@@ -125,42 +130,55 @@ static int connect_display(void) {
 
 extern uint64_t drm_commits;
 
+// One scan step: keep the host's copy of the screen current. Returns -1 to
+// drop the connection. Called with screen_lock held.
+static int scan_step(int fd, int *idle, int *quiet_ticks, int *busy_ticks, uint64_t *seen) {
+    // Poll ~60Hz right after display activity, ~4Hz otherwise; wake early on 'R'.
+    struct pollfd p = { fd, POLLIN, 0 };
+    if (poll(&p, 1, 16) > 0) {
+        char c;
+        if (recv(fd, &c, 1, 0) <= 0) return -1;
+        if (c == 'R' && send_rect(fd, 0, 0, W, H)) return -1;
+    }
+    if (poke) { poke = 0; *idle = 0; }
+    // Waveforms keep running after the image changes; tell the host so
+    // "wait until idle" covers the whole refresh.
+    if (drm_commits != *seen && ++*quiet_ticks >= 6) {
+        *seen = drm_commits; *quiet_ticks = 0;
+        if (send_all(fd, "A", 1)) return -1;
+    }
+    // xochitl's main thread computing (building a page) counts as activity too.
+    if (main_thread_busy(200) && ++*busy_ticks >= 6) {
+        *busy_ticks = 0;
+        if (send_all(fd, "A", 1)) return -1;
+    }
+    if ((*idle)++ > 30 && *idle % 15) return 0;
+    return scan(fd);
+}
+
 static void *scanner(void *arg) {
     (void)arg;
     int fd = -1, idle = 0, quiet_ticks = 0, busy_ticks = 0;
     uint64_t seen = 0;
     for (;;) {
-        if (fd < 0 && (fd = connect_display()) < 0) { sleep(1); continue; }
-        // Poll ~60Hz right after display activity, ~4Hz otherwise; wake early on 'R'.
-        struct pollfd p = { fd, POLLIN, 0 };
-        if (poll(&p, 1, 16) > 0) {
-            char c;
-            if (recv(fd, &c, 1, 0) <= 0) { close(fd); fd = -1; continue; }
-            if (c == 'R' && send_rect(fd, 0, 0, W, H)) { close(fd); fd = -1; continue; }
-        }
-        if (poke) { poke = 0; idle = 0; }
-        // Waveforms keep running after the image changes; tell the host so
-        // "wait until idle" covers the whole refresh.
-        if (drm_commits != seen && ++quiet_ticks >= 6) {
-            seen = drm_commits; quiet_ticks = 0;
-            if (send_all(fd, "A", 1)) { close(fd); fd = -1; continue; }
-        }
-        // xochitl's main thread computing (building a page) counts as activity too.
-        if (main_thread_busy(200) && ++busy_ticks >= 6) {
-            busy_ticks = 0;
-            if (send_all(fd, "A", 1)) { close(fd); fd = -1; continue; }
-        }
-        if (idle++ > 30 && idle % 15) continue;
-        if (scan(fd)) { close(fd); fd = -1; }
+        pthread_mutex_lock(&screen_lock);
+        // xochitl destroyed its screen image (it is exiting): hands off.
+        if (!screen) { pthread_mutex_unlock(&screen_lock); sleep(1); continue; }
+        if (fd < 0) fd = connect_display();
+        if (fd >= 0 && scan_step(fd, &idle, &quiet_ticks, &busy_ticks, &seen)) { close(fd); fd = -1; }
+        pthread_mutex_unlock(&screen_lock);
+        if (fd < 0) sleep(1);
     }
     return NULL;
 }
 
 static void on_flip(void) { poke = 1; }
 
-static void found_screen(const void *data, long bpl, int fmt) {
+static void found_screen(const void *img, const void *data, long bpl, int fmt) {
     if (!shadow) shadow = calloc((size_t)W * H, 4);
-    screen_fmt = fmt; screen_bpp = fmt_bpp(fmt); screen_bpl = bpl; screen = data;
+    pthread_mutex_lock(&screen_lock);
+    screen_fmt = fmt; screen_bpp = fmt_bpp(fmt); screen_bpl = bpl; screen = data; screen_img = img;
+    pthread_mutex_unlock(&screen_lock);
     LOG("fb: captured screen buffer %p (%dx%d bpl %ld format %d)", data, W, H, bpl, fmt);
     static int started;
     if (started++) return;
@@ -181,7 +199,28 @@ void _ZN6QImageC1EPhiixNS_6FormatEPFvPvES2_(void *self, unsigned char *data, int
     if (w >= 1000 && h >= 1000) TRACE("fb: QImage(data) %dx%d bpl=%lld fmt=%d", w, h, bpl, fmt);
     static int pick = -1;
     if (pick < 0) pick = getenv("RMEMU_FB_FORMAT") ? atoi(getenv("RMEMU_FB_FORMAT")) : 4;
-    if (w == W && h == H && fmt_bpp(fmt) && (!pick || fmt == pick)) found_screen(data, (long)bpl, fmt);
+    if (w == W && h == H && fmt_bpp(fmt) && (!pick || fmt == pick)) found_screen(self, data, (long)bpl, fmt);
+}
+
+// QImage::~QImage(): when the screen's QImage goes, stop reading its memory.
+static void screen_image_gone(void *self) {
+    if (!self || self != screen_img) return;
+    pthread_mutex_lock(&screen_lock);
+    screen = NULL; screen_img = NULL;
+    pthread_mutex_unlock(&screen_lock);
+    TRACE("fb: screen image destroyed, scanner stops");
+}
+void _ZN6QImageD1Ev(void *self) {
+    static void (*real)(void *);
+    if (!real) real = dlsym(RTLD_NEXT, "_ZN6QImageD1Ev");
+    screen_image_gone(self);
+    real(self);
+}
+void _ZN6QImageD2Ev(void *self) {
+    static void (*real)(void *);
+    if (!real) real = dlsym(RTLD_NEXT, "_ZN6QImageD2Ev");
+    screen_image_gone(self);
+    real(self);
 }
 
 void fb_init(void) {}

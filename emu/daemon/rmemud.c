@@ -116,12 +116,24 @@ static void emit(int dev, int type, int code, int value) {
     if (nbatch[dev] < 64) batch[dev][nbatch[dev]++] = (struct input_event){ .type = type, .code = code, .value = value };
 }
 
+// Readers that don't load the shim (static binaries, e.g. pp-agent's
+// triple-press watcher) can't see the fake devices through it. For them each
+// device is also a FIFO at its /dev/input path, fed the same events while
+// someone has it open.
+static int fifo_fd[NDEV] = { -1, -1, -1, -1 };
+static void fifo_send(int dev, const void *buf, size_t n) {
+    if (fifo_fd[dev] < 0) fifo_fd[dev] = open(dev_path(dev), O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+    if (fifo_fd[dev] < 0) return;  // nobody reading
+    if (write(fifo_fd[dev], buf, n) < 0 && errno != EAGAIN) { close(fifo_fd[dev]); fifo_fd[dev] = -1; }
+}
+
 static void flush(int dev) {
     emit(dev, EV_SYN, SYN_REPORT, 0);
     struct timeval tv;
     gettimeofday(&tv, NULL);
     for (int i = 0; i < nbatch[dev]; i++) batch[dev][i].time = tv;
     size_t n = sizeof batch[dev][0] * nbatch[dev];
+    fifo_send(dev, batch[dev], n);
     for (int i = 0; i < MAXC; i++) {
         struct conn *c = &conns[i];
         if (c->kind != C_READER || c->dev != dev) continue;
@@ -332,6 +344,8 @@ static void on_readable(struct conn *c) {
 int main(void) {
     signal(SIGPIPE, SIG_IGN);
     mkdir(RMEMU_RUN, 0755);
+    mkdir("/dev/input", 0755);
+    for (int i = 0; i < NDEV; i++) { unlink(dev_path(i)); mkfifo(dev_path(i), 0660); }
 
     int sfd = open(RMEMU_STATE_FILE, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
     if (sfd < 0 || ftruncate(sfd, sizeof *state)) { LOG("cannot create %s", RMEMU_STATE_FILE); return 1; }
