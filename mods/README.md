@@ -62,7 +62,7 @@ qt-resource-rebuilder can only apply AppLoad's hashed QML diff if it has a **has
 
 - **Cache.** The result goes in `/home/root/.cache/pp-hashtab/<key>/`. The key is the sha256 of `/usr/bin/xochitl` plus that of `qt-resource-rebuilder.so`. A later install or release with the same pair reuses it.
 - **Stays stock while it runs.** It always brings stock xochitl back at the end, even when it fails.
-- **Same steps in the emulator.** The emulator runs the same xochitl build. The file is not byte-reproducible, though: two emulator runs gave the same size (646221 bytes, 19609 entries) but different sha256s, probably from hash-map ordering. So compare sizes and entry counts with the tablet's, not hashes.
+- **Same steps in the emulator.** The emulator runs the same xochitl build. The file is not byte-reproducible, though: three emulator runs gave the same size (646221 bytes, 19609 entries) but three different sha256s, probably from hash-map ordering. So compare sizes and entry counts with the tablet's, not hashes.
 
 The hashtab is derived from reMarkable's QML (it maps hashes to their identifier strings), so it is never committed and never shipped. Each device builds its own.
 
@@ -155,15 +155,17 @@ Run on Oct 25 2026: x86_64 dev container, 4 vCPU, arm64 through qemu-user, emula
 
 **Rung 2, manual install**
 
-- **Clean slate.** `ppemu reset` and `ppemu start`, then: `/home/root/xovi`, `/etc/systemd/system/xochitl.service.d` and `/home/root/.cache/pp-hashtab` don't exist, and xochitl maps no xovi. Then `ppemu skip-setup`.
-- **Install.** `mods/install.sh emu` takes 92 to 96 s. That includes `hashtab: saved ... (646221 bytes ...) in 72s` (74 s on another run). `status` then says `xovi ON`, mapped `appload.so`, `qt-resource-rebuilder.so`, `xovi.so`, `hashtab: ok`.
+- **Clean slate, twice** (the second time with the final artifact, `mods/emu-smoke.sh --install`, all green). `ppemu reset` and `ppemu start`, then: `/home/root/xovi`, `/etc/systemd/system/xochitl.service.d` and `/home/root/.cache/pp-hashtab` don't exist, and xochitl maps no xovi. Then `ppemu skip-setup`.
+- **Install.** `mods/install.sh emu` takes 92 to 96 s. That includes `hashtab: saved ... (646221 bytes ...)` in 72 to 74 s. `status` then says `xovi ON`, mapped `appload.so`, `qt-resource-rebuilder.so`, `xovi.so`, `hashtab: ok`.
 - **Logs.** `[qmldiff]: Hashtab loaded! Cached 19609 entries` and `Loaded external AppLoad hooks in main UI`. qmldiff processes `MainView.qml`, `Navigator.qml`, `Sidebar.qml` and `GesturesWindow.qml` with no errors.
 - **The app.** The side menu shows **AppLoad**, AppLoad lists **Hello**, and the app shows `hello from paper-pure / release ... / OS 3.27.2.2`. Close works, Back returns to My files. `mods/emu-smoke.sh` does all of this in 27 s.
 - **Writing is untouched with mods on.** In an open notebook, `ppemu draw 600,700 800,600 1000,750 1200,600` turned all 4 points from (255,255,255) to (0,0,0).
 - **Stock.** `xovi/stock` gives `status` `stock (no xovi)`, and the side menu has no AppLoad entry.
 - **Proof screenshots** (scratch, not in the repo):
   - `.../work-pp-mods/emu-2-sidebar.png`, `emu-3-appload.png`, `emu-4-hello.png`, `emu-9-stock-sidebar.png`
-  - `smoke-clean/` and `smoke-final/`
+  - `smoke-clean/`, `smoke-final/` (final artifact) and `smoke-agent/` (agent-installed `e2e-1`)
+
+The emulator was left running the final artifact through the manual install (xovi ON, AppLoad in the side menu). `ppemu restart` brings stock back, and `ppemu reset` wipes everything back to a factory-fresh stock device.
 
 **Rung 2, through the update agent**
 

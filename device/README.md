@@ -53,6 +53,7 @@ Not used: an `AutoUpdate` key exists in xochitl's settings code, but the Updates
 ## Never brick
 
 - **Mods wait for rm-sanity.** The boot ROM counts boot attempts per slot and switches slot past a limit (SPL strings: `ABINFO: A (ecnt = %u)`, `A in error state, switch to B`, and with both slots bad, recovery mode, which needs a cable). `rm-sanity.service` clears the count 60 s after boot. If a mod crashes xochitl before that, the stock units (`StartLimitBurst=4`, `OnFailure=emergency.target`, `rm-emergency.sh` reboots) loop the tablet, and the count climbs to a slot switch onto an unfrozen OS. So `pp-agent-boot.service` gets a drop-in: `ExecStartPre=wait-sanity.sh` waits until `rm-sanity` has run this boot and `root<slot>_errcnt` is 0, up to 5 minutes, else mods stay off this boot. A mod crash loop then costs one reboot per try with the count at 1, and pp-agent's own boot guard (3 unhealthy boots, then stock) ends it.
+- The wait has a cost: `pp-agent-boot` is a oneshot wanted by `multi-user.target`, so `multi-user.target` is reached about 60 s after boot instead of about 20 s. Nothing of reMarkable's is ordered after it (only stock `graphical.target` and `systemd-boot-check-no-failures`, neither used). xochitl starts as before.
 - **Kill switches.** `touch /home/root/paper-pure/disable` (pp-agent's switch, then reboot). Reboot is stock unless pp-agent activates a release. Triple-press needs xovi-tripletap in toggle mode, not installed yet (see `mods/README.md`); its unit should go in with `pp-device.sh persist`.
 - **Undo.** `--uninstall` restores every path in `managed.list` from `stock/`.
 
@@ -81,10 +82,20 @@ Nothing here touches xochitl, its unit, the pen or display stack. We stop update
 
 The test bed (`test/testbed/`) is the real 3.27.2.2 root fs running its own systemd 255 as PID 1 in a container, laid out like the tablet: `/` read-only, `/etc` overlaid by the image's own `var-volatile-etc.service`, `/etc/dropbear` bound from `/home` by the stock `etc-dropbear.mount`, the stock dropbear behind the stock developer-mode check, persistent `/home` and `/data` volumes, and a fake boot ROM counter (`lpgpr`) that survives reboots. A reboot is the container stopping and starting. Differences from the tablet: xochitl is a stand-in that pets the watchdog; memfaultd and systemd-resolved can't run there; hardware units are masked in `/run` only.
 
-`device/test/run.sh <rootfs>`: RESULT_PLACEHOLDER
+`PP_SLOW=1 device/test/run.sh <extracted 3.27.2.2 rootfs>`: **48 passed, 0 failed**, about 25 minutes (the fast part, scenarios 1 to 7, about 6 minutes). What it shows:
 
-Also:
+1. On a stock test bed, `--verify` exits 1, flags the unmasked units and the missing hosts block, and changes nothing. Stock memfaultd starts.
+2. `install` exits 0 and ends with every check PASS; a fresh key-only SSH connection works; `/` is read-only again; no bind mount is left; `/etc/dropbear` is still mounted; `device.cloud.remarkable.com` resolves to `0.0.0.0` (busybox `wget` prints the address); the stock hosts lines are kept.
+3. A second `install` changes nothing (0 `CHANGE` lines).
+4. After a reboot, `--verify` passes. The overlay's tmpfs upper holds none of our files, so it all comes from the root fs. `swupdate`, `update-engine` and `memfaultd` never left "inactive" that boot. rm-sanity clears the counter.
+5. Drift: a live-only unmask is caught (and reported as live vs root fs drift); a root-fs-only edit of `/etc/hosts` is caught; the Wi-Fi SSH marker is caught. `install` repairs all three.
+6. `--agent --proxy`: exits 0 and `/` goes back to read-only. After a reboot, `--verify` passes with the agent and proxy checks; `pp-proxy.service` runs from the persisted unit; `my.remarkable.com` resolves to `127.0.0.1`; the proxy's CA is in the live bundle; `pp-agent.timer` is active; `wait-sanity.sh` logs "rm-sanity done, roota_errcnt=0 after 34s"; `pp-agent boot` started 3 s after `rm-sanity` exited (monotonic timestamps), and logged "boot: stock (no release installed)".
+7. `--uninstall`, then reboot: verify fails again (stock), `swupdate.service` is enabled, no freeze block, stock hosts lines intact, `pp-agent-boot` not enabled. `install` brings it all back.
+8. (`PP_SLOW=1`) A stand-in "mod" that breaks xochitl at every boot. Started as soon as xochitl is up (a naive autostart), the stock units reboot the tablet after 34 to 37 s (console: `xochitl.service: Start request repeated too quickly`, `Triggering OnFailure= dependencies`, `rm-emergency.service`, `Rebooting.`), before rm-sanity, and the counter goes 1, 2, 3, then over the limit: a slot switch. The same "mod" behind our wait (an `ExecStartPost` on `pp-agent-boot`): it reboots after 82 to 83 s, the counter is 1 at every boot, no slot switch. After that, `--verify` still passes.
 
+Also checked:
+
+- `systemd-analyze verify --root=<copy of the tatsu systemd tree + agent units + our drop-in>` on `pp-agent-boot.service`, `pp-agent.service`, `pp-agent.timer`: no output, exit 0. A drop-in with a bogus key is reported. `systemctl --root=... is-enabled` gives `masked` for swupdate, update-engine, memfaultd and dropbear-wlan.socket.
 - Against a private emulator instance (`pp-emu-tatsu:3.27.2.2` as `pp-device-emu`, SSH on 3097): `device/install.sh` installs, verifies all PASS, and leaves SSH working. That covers the no-overlay path (`/etc/hosts` is a docker bind mount there, written in place) and the emulator's fake `systemctl`.
 - In the emulator's 3.27.2.2 UI: Settings > General > Software has **Updates** and **Advanced** switches. Advanced shows "reMarkable beta program", "Retail mode", "Developer mode: Enabled". Switching Updates on shows "Install new software versions as they are released." and "Check for updates", logs `rm.upgrades Error when enabling update engine!` (no systemd there), and writes nothing to `xochitl.conf`, even after a restart. With no systemd, it reads off again after the restart. Settings > Help > Copyrights and licenses > General information shows "...username 'root' and the password '<DeveloperPassword from xochitl.conf>'".
 - `tailscaled` v1.80.3, `GOARCH=arm64 CGO_ENABLED=0`, `--tun=userspace-networking`, in a `pp-device-rootfs` container with `--network none`: starts, "Engine created", state `NeedsLogin`; `/dev/net/tun` absent.
@@ -93,9 +104,9 @@ Also:
 
 ### Not verified
 
-- Anything on the real tablet. In particular: that `mount -o remount,rw /` works in developer mode on the Pure (u-boot env says no verity; remagic reports it on the Paper Pro family); that `drop_caches` clears the EBUSY after `--uninstall` (the container can't write `/proc/sys`, so there `/` stays read-write until reboot); `rootdev --active` vs `--next-boot` and the other slot's version; `/proc/cmdline`; the real boot ROM limit (the test bed uses 3).
+- Anything on the real tablet. In particular: that `mount -o remount,rw /` works in developer mode on the Pure (u-boot env says no verity; remagic reports it on the Paper Pro family); the `drop_caches` retry when `remount,ro` hits EBUSY (never needed in the test bed after the in-place fix, and the container can't write `/proc/sys` anyway); `rootdev --active` vs `--next-boot` and the other slot's version; `/proc/cmdline`; the real boot ROM limit (the test bed uses 3).
 - The Updates switch with update-engine masked on real systemd (expected: off, and switching on fails).
-- That resolved answers AAAA for a name that `/etc/hosts` maps only to `0.0.0.0` without asking DNS. On the tablet nothing has IPv6 routes by default.
+- An AAAA (IPv6) lookup of a blocked name. systemd-resolved can't run in the test bed, so name lookups there went to `/etc/hosts` directly.
 - Tailscale login, reachability, battery cost.
 - The developer mode flow itself and onboarding without Wi-Fi.
 
