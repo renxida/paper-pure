@@ -6,9 +6,10 @@
 # root@10.11.99.1 (USB) for a tablet in developer mode.
 # Steps on the device:
 #   1. back to stock if xovi is running (xovi/stock)
-#   2. unpack the tarball to /home/root/xovi.new, carry the hashtab over,
-#      swap it in; the old tree stays as /home/root/xovi.prev
-#   3. build the hashtab if this xochitl/qt-resource-rebuilder pair has none
+#   2. unpack the tarball to /home/root/xovi.new and swap it in; the old tree
+#      stays as /home/root/xovi.prev
+#   3. hashtab for this xochitl + qt-resource-rebuilder: from the cache, or
+#      built once (xovi/paper-pure/hashtab)
 #   4. xovi/start (tethered: a reboot returns stock), then check that
 #      xochitl really mapped xovi.so
 set -euo pipefail
@@ -42,7 +43,7 @@ echo "device: $(cat /sys/devices/soc0/machine 2>/dev/null), OS $(sed -n 's/^IMG_
 [ "$(sha256sum /tmp/pp-xovi.tar.gz | cut -d' ' -f1)" = "$SHA" ] || { echo "device: tarball sha256 mismatch" >&2; exit 1; }
 
 pid=$(pidof xochitl || true)
-if [ -n "$pid" ] && grep -q /home/root/xovi/xovi.so "/proc/${pid%% *}/maps" && [ -x xovi/stock ]; then
+if [ -n "$pid" ] && grep -q "/xovi.so" "/proc/${pid%% *}/maps" && [ -x xovi/stock ]; then
     echo "device: xovi is running, going back to stock first"
     xovi/stock
 fi
@@ -50,10 +51,8 @@ fi
 rm -rf xovi.new && mkdir xovi.new
 tar -xzf /tmp/pp-xovi.tar.gz -C xovi.new --strip-components=1
 rm -f /tmp/pp-xovi.tar.gz
-old=xovi/exthome/qt-resource-rebuilder
-if [ -s "$old/hashtab" ]; then cp -p "$old/hashtab" "$old/hashtab.key" xovi.new/exthome/qt-resource-rebuilder/ 2>/dev/null || true; fi
 rm -rf xovi.prev
-[ -d xovi ] && mv xovi xovi.prev
+if [ -L xovi ]; then rm xovi; elif [ -d xovi ]; then mv xovi xovi.prev; fi
 mv xovi.new xovi
 echo "device: installed $(sed -n 2p xovi/BUILDINFO) to /home/root/xovi"
 
@@ -64,7 +63,7 @@ if [ "$START" = 1 ]; then
     if [ -d /opt/rmemu ]; then xovi/paper-pure/emu-start; fi
     for _ in $(seq 1 120); do
         pid=$(pidof xochitl || true)
-        if [ -n "$pid" ] && grep -q /home/root/xovi/xovi.so "/proc/${pid%% *}/maps" 2>/dev/null; then break; fi
+        if [ -n "$pid" ] && grep -q "$(readlink -f xovi)/xovi.so" "/proc/${pid%% *}/maps" 2>/dev/null; then break; fi
         sleep 1
     done
     xovi/paper-pure/status

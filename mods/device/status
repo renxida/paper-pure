@@ -6,9 +6,10 @@ echo "os: $(sed -n 's/^IMG_VERSION=//p' /etc/os-release | tr -d '"')"
 head -n 2 "$xovi/BUILDINFO" 2>/dev/null
 pid=$(pidof xochitl) || { echo "xochitl: not running"; exit 1; }
 pid=${pid%% *}
-if grep -q "$xovi/xovi.so" "/proc/$pid/maps"; then
-    echo "xochitl $pid: xovi ON"
-    grep -o "$xovi/[^ ]*\.so" "/proc/$pid/maps" | sort -u | sed 's/^/  mapped /'
+real=$(readlink -f "$xovi")   # a link into a pp-agent release, or a plain dir
+if grep -q "$real/xovi.so" "/proc/$pid/maps"; then
+    echo "xochitl $pid: xovi ON ($real)"
+    grep -o "$real/[^ ]*\.so" "/proc/$pid/maps" | sort -u | sed 's|.*/|  mapped |'
 else
     echo "xochitl $pid: stock (no xovi)"
 fi

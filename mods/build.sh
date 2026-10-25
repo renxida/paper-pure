@@ -1,6 +1,7 @@
 #!/bin/bash
 # Build the mod stack for the Paper Pure from pinned upstream sources.
-#   mods/build.sh                  -> mods/out/xovi-tatsu.tar.gz, BUILDINFO, elf-info.txt
+#   mods/build.sh   -> mods/out/xovi-tatsu.tar.gz (for install.sh), mods/out/release/
+#                      (a pp-agent release tree), BUILDINFO, elf-info.txt
 #   RELEASE_ID=2026-10-25.1 mods/build.sh   (baked into apps; default dev-<git sha>)
 # Needs git and docker with buildx. On x86 also qemu-user binfmt for arm64.
 # Behind a TLS-intercepting proxy: PP_BUILD_CA=/path/to/ca.pem (for cargo).
@@ -53,4 +54,11 @@ secret=()
 docker buildx build --platform linux/arm64 --build-arg RELEASE_ID="$id" "${secret[@]}" \
     -f "$mods/build/Dockerfile" --output "type=local,dest=$out" "$ctx"
 "$mods/build/check-abi.sh" "$out/xovi-tatsu.tar.gz"
-echo "mods/build.sh: $out/xovi-tatsu.tar.gz (release $id)"
+
+# 4. A pp-agent release tree: the xovi tree plus our hooks and checks.
+#    agent/out/ppsign pack -dir mods/out/release -id "$id" -os 3.27.2.2 \
+#        -expect-mapped xovi.so -expect-mapped appload.so ...
+mkdir -p "$out/release"
+tar -xzf "$out/xovi-tatsu.tar.gz" -C "$out/release"
+cp -r "$mods/release/hooks" "$mods/release/checks" "$out/release/"
+echo "mods/build.sh: $out/xovi-tatsu.tar.gz and $out/release/ (release $id)"
