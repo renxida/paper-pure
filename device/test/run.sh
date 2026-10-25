@@ -16,7 +16,9 @@
 # Scenario 9 runs the real pp-agent with the mods lane's real hooks and
 # upstream's xovi/start and xovi/stock: triple-press toggle (KEY_POWER events
 # written into a FIFO the agent reads as its power key), reboot = stock, and
-# crash loops at install and at boot.
+# crash loops at install and at boot. Scenario 7 reinstalls over a
+# crash-looping memfaultd; scenario 10 boots with /home locked behind a
+# passcode, which only xochitl can ask for.
 #
 # Needs docker with arm64 emulation (binfmt), ssh, ssh-keygen, go (for
 # pp-proxy and the agent), git, python3.
@@ -241,8 +243,12 @@ check "pp-agent-tripletap started only after rm-sanity exited" dev '
     b=$(systemctl show -P ExecMainStartTimestampMonotonic pp-agent-tripletap.service)
     echo "rm-sanity exited at $s us, pp-agent-tripletap started at $b us"; [ "$s" -gt 0 ] && [ "$b" -gt "$s" ]'
 
-t "7. uninstall puts the root fs back to stock"
+t "7. uninstall puts the root fs back to stock; reinstall over a crash-looping memfaultd"
 "$REPO/device/install.sh" -p "$PORT" -i "$WORK/id" --uninstall root@127.0.0.1 > "$WORK/7-uninstall.log" 2>&1
+# Next boot: stock memfaultd is back, and here it crash-loops as fast as it
+# can (boot.sh). A daemon-reload landing on its pending restart right after
+# the mask once aborted systemd's PID 1; install now stops it first.
+dev 'touch /pp-state/memfaultd-loop'
 reboot
 out=$(inst --verify 2>&1) && rc=0 || rc=$?
 check "verify fails again (stock)" [ "$rc" = 1 ]
@@ -251,7 +257,16 @@ check "no freeze block in /etc/hosts" dev '! grep -q "paper-pure freeze" /etc/ho
 check "stock /etc/hosts lines still there" dev 'grep -q "^127.0.0.1.*localhost" /etc/hosts'
 check "pp-agent-boot no longer enabled" dev '! test -e /etc/systemd/system/multi-user.target.wants/pp-agent-boot.service'
 check "pp-agent-tripletap no longer enabled" dev '! test -e /etc/systemd/system/multi-user.target.wants/pp-agent-tripletap.service'
-inst > "$WORK/7-reinstall.log" 2>&1
+check "memfaultd is crash-looping before the reinstall" dev '
+    a=$(systemctl show -P NRestarts memfaultd.service); sleep 10; b=$(systemctl show -P NRestarts memfaultd.service)
+    echo "  memfaultd restarts: $a, 10 s later $b"; [ "$b" -gt "$a" ]'
+inst > "$WORK/7-reinstall.log" 2>&1 && rc=0 || rc=$?
+check "reinstall over the crash loop exits 0" [ "$rc" = 0 ]
+check "the test bed stayed up (PID 1 survived the mask and reload)" alive
+check "memfaultd was stopped before it was masked (inactive, not failed)" dev '
+    s=$(systemctl is-active memfaultd.service); e=$(systemctl is-enabled memfaultd.service); echo "  memfaultd: $s, $e"
+    [ "$s" = inactive ] && [ "$e" = masked ]'
+dev 'rm -f /pp-state/memfaultd-loop'
 check "and install brings it all back" logto "$WORK/7-verify-reinstalled.log" inst --verify
 
 t "9. kill switch and crash loops: real pp-agent, real mods hooks, systemd 255"
@@ -446,6 +461,39 @@ check "9h. with the file: a triple-press never turns mods on" wait_run "$r" "tri
 check "9h. xochitl stock" stock_ui
 check "9h. pp-agent.service skips while the file exists" dev 'systemctl start pp-agent.service; [ "$(systemctl show -P ConditionResult pp-agent.service)" = no ]'
 dev 'rm -f /home/root/paper-pure/disable; systemctl stop pp-test-feed' || true
+
+t "10. a passcode: /home stays locked until it is typed into xochitl, so xochitl must start without it"
+# On the tablet homecryptor waits for the passcode, and only xochitl can ask
+# for it. A unit of ours ordered before xochitl (pp-proxy had Before=xochitl
+# and needs /home) made xochitl wait past its 60 s JobTimeoutSec:
+# OnFailure=emergency.target rebooted the tablet at every boot, no UI ever.
+# boot.sh's stand-in: home.mount waits for systemd-ask-password.
+dex() { docker exec "$C" sh -c "$1"; }
+docker exec "$C" touch /pp-state/passcode
+n=$(dex 'wc -l < /pp-state/boots.log')
+dev 'systemctl reboot' 2> /dev/null || true
+start10=$(date +%s)
+while running; do [ $(($(date +%s) - start10)) -lt 120 ] || docker stop -t 5 "$C" > /dev/null; sleep 2; done
+docker start "$C" > /dev/null
+start10=$(date +%s)
+for _ in $(seq 1 60); do [ "$(dex 'systemctl is-active xochitl.service' 2> /dev/null)" = active ] && break; running || break; sleep 3; done
+echo "  xochitl: $(dex 'systemctl is-active xochitl.service' 2>&1) after $(($(date +%s) - start10)) s, /home locked"
+# Past xochitl's 60 s JobTimeoutSec, with margin: still up, no reboot.
+while running && [ $(($(date +%s) - start10)) -lt 100 ]; do sleep 5; done
+check "10. the test bed did not reboot (xochitl's start job did not time out)" alive
+check "10. still the same boot" [ "$(dex 'wc -l < /pp-state/boots.log')" = "$((n + 1))" ]
+check "10. xochitl runs while /home is locked" dex '[ "$(systemctl is-active xochitl.service)" = active ] && ! grep -q " /home " /proc/mounts'
+check "10. our units wait for /home, xochitl does not" dex '
+    j=$(systemctl list-jobs --no-legend); echo "$j" | grep -E "home.mount|pp-" | sed "s/^/   job: /"
+    echo "$j" | grep -q "home.mount .*waiting" && echo "$j" | grep -q "pp-proxy.service .*waiting" && ! echo "$j" | grep -qE "[[:space:]]xochitl[.]service[[:space:]]"'
+check "10. the console never says xochitl's start job timed out" bash -c "! docker logs --since $start10 $C 2>&1 | grep -q 'xochitl.service/start timed out'"
+dex 'kill $(pidof systemd-ask-password)'   # the passcode, typed into xochitl
+check "10. after the passcode: /home mounted, SSH back" dev 'grep -q " /home " /proc/mounts'
+check "10. pp-proxy runs" dev 'for i in $(seq 1 40); do systemctl is-active -q pp-proxy.service && exit 0; sleep 3; done; exit 1'
+check "10. pp-agent boot ran, after rm-sanity" agent_booted
+check "10. verify passes (including: xochitl waits for nothing of ours)" logto "$WORK/10-verify.log" inst --verify
+docker exec "$C" rm -f /pp-state/passcode
+reboot
 
 if [ "${PP_SLOW:-0}" = 1 ]; then
     t "8. a mod that crashes xochitl at every boot (slow): early vs after rm-sanity"

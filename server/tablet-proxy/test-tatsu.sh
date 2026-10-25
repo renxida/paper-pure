@@ -73,9 +73,13 @@ eq "cloud names in /etc/hosts (after 2 runs)" "$(dx grep -c '^127.0.0.1 .*\(rema
 eq "unit" "$(dx ls /run/systemd/system/pp-proxy.service)" /run/systemd/system/pp-proxy.service
 eq "systemctl calls" "$(dx sort -u /tmp/systemctl.log | tr '\n' ',')" "daemon-reload,reset-failed xochitl.service,restart pp-proxy.service,start xochitl.service,stop xochitl.service,"
 eq "notes marked not synced" "$(dx grep -c '"synced": false' /home/root/.local/share/remarkable/xochitl/proof.metadata)" 1
-# The persistent install trusts the CA with the tablet's own tool instead.
-out=$(dx sh -c 'mkdir -p /usr/local/share/ca-certificates && cp /home/root/paper-pure/proxy/ca.crt /usr/local/share/ca-certificates/pp-proxy.crt && update-ca-certificates 2>&1')
-case "$out" in *"1 added"*) ok "update-ca-certificates (persist path): 1 added" ;; *) die "update-ca-certificates: $out" ;; esac
+# No other mode: persisting is pp-device's job (device/install.sh --proxy).
+# With no argument it refuses and touches nothing (it used to umount -R /etc).
+n=$(dx sh -c 'wc -l < /tmp/systemctl.log; md5sum < /etc/hosts')
+# shellcheck disable=SC2016 # $PATH expands inside the container
+if out=$(dx sh -c 'cd /home/root/inst && PATH=/fake:$PATH bash install.sh 2>&1'); then die "install.sh with no argument ran: $out"; fi
+has "install.sh with no argument refuses" "$out" "usage: install.sh --runtime"
+eq "install.sh with no argument changed nothing (systemctl calls, /etc/hosts)" "$(dx sh -c 'wc -l < /tmp/systemctl.log; md5sum < /etc/hosts')" "$n"
 
 dx sh -c "$P -listen 127.0.0.1:$PORT run > /tmp/proxy.log 2>&1 &"
 for _ in $(seq 60); do dx sh -c "echo | openssl s_client -connect 127.0.0.1:$PORT >/dev/null 2>&1" && break; sleep 0.5; done

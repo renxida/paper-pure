@@ -33,6 +33,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -70,6 +71,7 @@ type config struct {
 	upstream *url.URL
 	headers  map[string]string
 	caFile   string
+	status   string // sync.json for pp-agent's status report ("" = none)
 }
 
 func main() {
@@ -78,6 +80,7 @@ func main() {
 	listen := flag.String("listen", "127.0.0.1:443", "listen address")
 	up := flag.String("upstream", "", "server URL (default: scheme://host of feed_url)")
 	force := flag.Bool("force", false, "gencert: replace existing files")
+	status := flag.String("status", "/run/paper-pure/sync.json", "run: sync health for pp-agent's status report (\"\" = off)")
 	flag.Usage = func() { fmt.Fprint(os.Stderr, usage); flag.PrintDefaults() }
 	flag.Parse()
 	log.SetFlags(0)
@@ -101,6 +104,7 @@ func main() {
 			err = check(cfg)
 			break
 		}
+		cfg.status = *status
 		err = run(cfg, *dir, *listen)
 	default:
 		flag.Usage()
@@ -175,6 +179,8 @@ func newHandler(cfg config) (http.Handler, error) {
 	for _, h := range cloudHosts {
 		allowed[h] = true
 	}
+	health := &syncHealth{path: cfg.status, Since: time.Now().UTC()}
+	health.write()
 	rp := &httputil.ReverseProxy{
 		Transport: t,
 		Rewrite: func(pr *httputil.ProxyRequest) {
@@ -207,7 +213,71 @@ func newHandler(cfg config) (http.Handler, error) {
 		sw := &statusWriter{ResponseWriter: w, code: http.StatusOK}
 		rp.ServeHTTP(sw, r)
 		log.Printf("%s %s%s -> %d (%s)", r.Method, host, r.URL.Path, sw.code, time.Since(start).Round(time.Millisecond))
+		health.note(host+r.URL.Path, sw.code, time.Now().UTC())
 	}), nil
+}
+
+// syncHealth is what pp-agent reports about stock sync (desiderata row 1:
+// notes must not stop reaching the server unnoticed). It goes to a small
+// file on a tmpfs after every sync request and every error, so it starts
+// over at each boot ("since").
+type syncHealth struct {
+	mu        sync.Mutex
+	path      string
+	warned    bool
+	Since     time.Time  `json:"since"`
+	LastOK    *time.Time `json:"last_ok,omitempty"` // last 2xx/3xx on a /sync/ path
+	OK        int        `json:"ok"`
+	Errors    int        `json:"errors"` // 4xx/5xx on any path, e.g. Access refusing the token
+	LastError *syncError `json:"last_error,omitempty"`
+}
+
+type syncError struct {
+	Time time.Time `json:"time"`
+	Code int       `json:"code"`
+	Path string    `json:"path"`
+}
+
+func (h *syncHealth) note(path string, code int, now time.Time) {
+	failed := code >= 400
+	if !failed && !strings.Contains(path, "/sync/") {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if failed {
+		h.Errors++
+		h.LastError = &syncError{Time: now, Code: code, Path: path}
+	} else {
+		h.OK++
+		h.LastOK = &now
+	}
+	h.writeLocked()
+}
+
+func (h *syncHealth) write() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.writeLocked()
+}
+
+func (h *syncHealth) writeLocked() {
+	if h.path == "" {
+		return
+	}
+	b, _ := json.Marshal(h)
+	tmp := h.path + ".tmp"
+	err := os.MkdirAll(filepath.Dir(h.path), 0o755)
+	if err == nil {
+		err = os.WriteFile(tmp, append(b, '\n'), 0o644)
+	}
+	if err == nil {
+		err = os.Rename(tmp, h.path)
+	}
+	if err != nil && !h.warned {
+		log.Printf("sync health: %v (pp-agent's report won't have it)", err)
+		h.warned = true
+	}
 }
 
 // statusWriter records the status for the log. Unwrap lets the reverse

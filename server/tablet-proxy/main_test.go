@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"io"
@@ -99,6 +100,11 @@ func TestLoadConfig(t *testing.T) {
 // like the tablet after install.
 func proxyChain(t *testing.T, upstream http.Handler) (*http.Client, string) {
 	t.Helper()
+	return proxyChainStatus(t, upstream, "")
+}
+
+func proxyChainStatus(t *testing.T, upstream http.Handler, status string) (*http.Client, string) {
+	t.Helper()
 	up := httptest.NewServer(upstream)
 	t.Cleanup(up.Close)
 	dir := t.TempDir()
@@ -111,6 +117,7 @@ func proxyChain(t *testing.T, upstream http.Handler) (*http.Client, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cfg.status = status
 	h, err := newHandler(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -277,5 +284,59 @@ func TestOpenSSLAgrees(t *testing.T) {
 	out, err := verify("evil.pem", "pp.example.org")
 	if err == nil || !strings.Contains(out, "subtree") {
 		t.Errorf("evil cert: want a permitted-subtree violation, got %v %s", err, out)
+	}
+}
+
+func TestSyncHealthFile(t *testing.T) {
+	status := filepath.Join(t.TempDir(), "run", "sync.json")
+	client, _ := proxyChainStatus(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/token/json/2/user/new" {
+			http.Error(w, "Access refused", http.StatusForbidden)
+			return
+		}
+		fmt.Fprint(w, "ok")
+	}), status)
+	type file struct {
+		Since     time.Time  `json:"since"`
+		LastOK    *time.Time `json:"last_ok"`
+		OK        int        `json:"ok"`
+		Errors    int        `json:"errors"`
+		LastError *syncError `json:"last_error"`
+	}
+	read := func() file {
+		var h file
+		b, err := os.ReadFile(status)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(b, &h); err != nil {
+			t.Fatalf("%v: %s", err, b)
+		}
+		return h
+	}
+	if h := read(); h.Since.IsZero() || h.LastOK != nil || h.Errors != 0 {
+		t.Fatalf("at start: %+v", h)
+	}
+	get := func(u string) {
+		resp, err := client.Get(u)
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}
+	get("https://ping.remarkable.com/analytics/v2/events") // not sync: not counted
+	if h := read(); h.OK != 0 {
+		t.Fatalf("analytics counted as sync: %+v", h)
+	}
+	get("https://eu.tectonic.remarkable.com/sync/v4/root")
+	h := read()
+	if h.OK != 1 || h.LastOK == nil || h.Errors != 0 {
+		t.Fatalf("after a sync: %+v", h)
+	}
+	get("https://my.remarkable.com/token/json/2/user/new")
+	h = read()
+	if h.Errors != 1 || h.LastError == nil || h.LastError.Code != 403 || h.LastError.Path != "my.remarkable.com/token/json/2/user/new" {
+		t.Fatalf("after a refusal: %+v %+v", h, h.LastError)
 	}
 }
