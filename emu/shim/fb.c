@@ -22,9 +22,11 @@
 #define H RMEMU_SCREEN_H
 #define TILE 52  // divides both 1404 and 1872
 
-// xochitl's screen image. The Paper Pro's ACeP2 backend renders RGB32; the
-// Pure's Carta 1300 backend may use another QImage format, so keep the raw
-// bytes and convert per pixel on the way out.
+// xochitl's screen image. The Pure's Carta 1300 backend renders RGB32 like
+// the Paper Pro, but also creates a full-screen Grayscale8 QImage that stays
+// empty here. RMEMU_FB_FORMAT=<QImage::Format> picks which one to capture
+// (default 4, RGB32; 0 = the last full-screen image of any known format), so
+// keep raw bytes and convert per pixel on the way out.
 static const unsigned char *screen;
 static long screen_bpl;
 static int screen_fmt, screen_bpp;
@@ -125,7 +127,7 @@ extern uint64_t drm_commits;
 
 static void *scanner(void *arg) {
     (void)arg;
-    int fd = -1, idle = 0, quiet_ticks = 0;
+    int fd = -1, idle = 0, quiet_ticks = 0, busy_ticks = 0;
     uint64_t seen = 0;
     for (;;) {
         if (fd < 0 && (fd = connect_display()) < 0) { sleep(1); continue; }
@@ -141,6 +143,11 @@ static void *scanner(void *arg) {
         // "wait until idle" covers the whole refresh.
         if (drm_commits != seen && ++quiet_ticks >= 6) {
             seen = drm_commits; quiet_ticks = 0;
+            if (send_all(fd, "A", 1)) { close(fd); fd = -1; continue; }
+        }
+        // xochitl's main thread computing (building a page) counts as activity too.
+        if (main_thread_busy(200) && ++busy_ticks >= 6) {
+            busy_ticks = 0;
             if (send_all(fd, "A", 1)) { close(fd); fd = -1; continue; }
         }
         if (idle++ > 30 && idle % 15) continue;
@@ -165,7 +172,7 @@ static void found_screen(const void *data, long bpl, int fmt) {
 // xochitl's epaper renderer paints the whole UI into a full-screen QImage
 // wrapped around SWTCON-owned memory; SWTCON diffs it into waveform phases.
 // Grab it as it's constructed. (Other full-screen QImages, e.g. the boot
-// splash pixmap, are transient; they come without a cleanup function.)
+// splash pixmap, are transient.)
 void _ZN6QImageC1EPhiixNS_6FormatEPFvPvES2_(void *self, unsigned char *data, int w, int h, long long bpl, int fmt,
                                              void (*cleanup)(void *), void *info) {
     static void (*real)(void *, unsigned char *, int, int, long long, int, void (*)(void *), void *);

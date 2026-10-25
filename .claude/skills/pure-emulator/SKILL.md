@@ -43,8 +43,7 @@ emu/bin/ppemu wait --idle 3000            # until the screen stops changing
 Each input command waits for the screen to settle, then prints `ok (screen changed)` or `ok (no screen change)`.
 
 - "no screen change" usually means you missed: re-screenshot and re-measure.
-- **Under qemu, heavy screens arrive late.** Settings took 7 s to draw, opening a notebook about 5 s, first boot about 100 s. A tap can return "no screen change" while xochitl is still building the page. Run `ppemu wait --idle 5000 --timeout 30000` and look again before acting. Don't stack blind taps: each one lands on whatever screen is current, which may be one you haven't seen yet.
-- Once, with `--debug` tracing on, a page only appeared after the next input. If a screenshot stays stale for more than 30 s, a tap on empty space flushes it.
+- **Under qemu everything is slow** (a tap 4 to 5 s, Settings 11 s, boot about 100 s). Input commands already wait while xochitl's main thread is busy building a page, so trust "screen changed". If you get "no screen change" where you expected a change, `ppemu wait --idle 5000 --timeout 30000` and look again before acting. Don't stack blind taps: each one lands on whatever screen is current, which may be one you haven't seen yet.
 
 ## 3. Hardware
 
@@ -74,6 +73,7 @@ emu/bin/ppemu logs [-f]                  # xochitl + shim + rmemud
 - Only `/home` and `/data` persist (Docker volumes). Everything else is the read-only-in-spirit rootfs and resets when the container is recreated, like an OTA on the device.
 - Notebooks: `/home/root/.local/share/remarkable/xochitl/`. Settings: `/home/root/.config/remarkable/xochitl.conf`, `/data/xochitl.conf`.
 - `systemctl` only knows `xochitl`, `marker-manager`, `rmemud`. There is no systemd, no network, no cloud.
+- The device shell is bash plus busybox: `head -n 3` (not `head -3`), no `od -A`, no python, no curl. Pull files out and inspect them on the host.
 - Input devices for apps reading evdev directly: event0 power key, event1 pen (ABS_X 0..14040, ABS_Y 0..18720, pressure 0..4095), event2 touch (MT, 0..1403 x 0..1871), event3 hall sensor. These names and ranges are emulator guesses, not read off a Pure.
 
 ## 5. UI map (3.27.2.2; verify with a screenshot)

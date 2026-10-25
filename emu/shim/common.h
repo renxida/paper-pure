@@ -30,3 +30,9 @@ int input_dev_info(int i, const char **devnode, const char **name, const char **
 
 // fb.c
 void fb_init(void);
+
+// hooks.c: is the process's main thread busy (out of poll for a while)?
+// Under qemu-user xochitl can compute for tens of seconds before drawing a
+// screen; the display scanner reports that as activity so "wait until idle"
+// doesn't return in the middle of it.
+int main_thread_busy(long ms);

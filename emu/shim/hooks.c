@@ -176,6 +176,36 @@ int clock_gettime(clockid_t c, struct timespec *ts) {
     return r;
 }
 
+// Main-thread busy tracking (see common.h). Qt's event loop sleeps in
+// poll/ppoll; time spent outside it on the main thread is work.
+#include <poll.h>
+#include <sys/syscall.h>
+static volatile int main_in_poll;  // busy from process start until the first poll
+static volatile long long main_left_ns;
+static long long now_ns(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return t.tv_sec * 1000000000LL + t.tv_nsec;
+}
+static int is_main_thread(void) { return syscall(SYS_gettid) == getpid(); }
+int main_thread_busy(long ms) { return !main_in_poll && now_ns() - main_left_ns > ms * 1000000LL; }
+int poll(struct pollfd *fds, nfds_t n, int timeout) {
+    REAL(poll);
+    if (timeout == 0 || !is_main_thread()) return real_poll(fds, n, timeout);
+    main_in_poll = 1;
+    int r = real_poll(fds, n, timeout);
+    main_left_ns = now_ns(); main_in_poll = 0;
+    return r;
+}
+int ppoll(struct pollfd *fds, nfds_t n, const struct timespec *ts, const sigset_t *mask) {
+    REAL(ppoll);
+    if ((ts && !ts->tv_sec && !ts->tv_nsec) || !is_main_thread()) return real_ppoll(fds, n, ts, mask);
+    main_in_poll = 1;
+    int r = real_ppoll(fds, n, ts, mask);
+    main_left_ns = now_ns(); main_in_poll = 0;
+    return r;
+}
+
 // sd-event signal sources need the signal blocked first, and checks that it
 // is. qemu-user (x86 hosts) can't map the top few guest realtime signals onto
 // host signals, so blocking them silently does nothing and sd-event answers

@@ -18,6 +18,7 @@
 //   'M' marker: flags bit0 = docked (magnetically attached and charging)
 //   'C' charger: flags bit0 = USB power connected
 //   'B' battery: x = charge percent
+#define _GNU_SOURCE  // accept4
 #include "../shim/devices.h"
 #include <arpa/inet.h>
 #include <errno.h>

@@ -232,12 +232,11 @@ async function start(version) {
   console.log(`ssh: ppemu ssh   (or: ssh -i ${path.relative(process.cwd(), KEY)} -p ${SSH_PORT} root@127.0.0.1)`);
 }
 
-// Until xochitl is past its "Paper tablet is loading" splash. Under qemu-user
-// the splash's progress bar fills, then the screen sits still for ~25 s while
-// xochitl builds the home screen (main thread busy), so only a long quiet
-// spell means "done" there.
+// Until xochitl is past its boot splash. Under qemu-user the splash sits
+// still for 20 to 60 s while xochitl builds the first screen; the shim reports
+// that busy main thread as display activity, so a quiet spell means done.
 async function bootWait() {
-  await fetch(UI + `/api/wait?idle=${T(1500, 40000)}&min=${T(4000, 30000)}&timeout=${T(20000, 300000)}`).catch(() => {});
+  await fetch(UI + `/api/wait?idle=${T(1500, 8000)}&min=${T(4000, 20000)}&timeout=${T(20000, 300000)}`).catch(() => {});
 }
 
 function stop() {
