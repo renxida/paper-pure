@@ -11,7 +11,7 @@
 # stale root generation in sync v3" (#506) and the Paper Pure docs (#447).
 ARG RMFAKECLOUD_COMMIT=3c6de006bdc465bdc0aa14b4de8fac78b5096ee6
 
-FROM node:22.23.4-trixie-slim@sha256:8eb619e402eaede1748a3c8173bffab391592812e85136452f781741c7242ddf AS ui
+FROM node:26.13.1-trixie-slim@sha256:e6bedef217677b276c591795e169840edd9096dbf13f29df8ef8d1856b8820bc AS ui
 ARG RMFAKECLOUD_COMMIT
 # BuildKit fetches the exact commit itself; no git in the image.
 ADD --keep-git-dir=false https://github.com/ddvk/rmfakecloud.git#${RMFAKECLOUD_COMMIT} /src
