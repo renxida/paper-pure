@@ -36,7 +36,7 @@ COPY ppd/ ./ppd/
 RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/ppd ./ppd
 
 FROM restic/restic:0.19.1@sha256:136600b6ff6843d61d355f7f71f460a166429f35de6fd11b568fece3c9a4d510 AS restic
-FROM cloudflare/cloudflared:2026.10.0@sha256:9b49eed8f62806d5d45ddf59ecefb5710429598ea6d3fcccd2af938f621b2b07 AS cloudflared
+FROM cloudflare/cloudflared:2026.11.0@sha256:b94b96edf2c9c4360f8879c8580cfaa99077f19c849ec595ca2f711b27d4f344 AS cloudflared
 
 # The official Python image is Debian trixie-slim plus Python (about 45 MB),
 # for the wish scanner (wishes/wishes.py). Its two libraries add about 20 MB.
