@@ -22,7 +22,7 @@ RUN --mount=type=secret,id=build_ca \
     if [ -f /run/secrets/build_ca ]; then export NODE_EXTRA_CA_CERTS=/run/secrets/build_ca; fi; \
     npm install -g pnpm@9.15.9 && pnpm install --frozen-lockfile && pnpm build
 
-FROM golang:1.26.10-trixie@sha256:909771fef53e3dcb0950255f0c9a8b4728c3b841e61509c7b29b098de7ee02d4 AS build
+FROM golang:1.27.4-trixie@sha256:f18c3d73a184fb0582828510722e723b63a93f7188d11dd223d9be6f6880e65d AS build
 ARG RMFAKECLOUD_COMMIT
 COPY --from=ui /src /src
 WORKDIR /src
