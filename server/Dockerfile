@@ -40,7 +40,7 @@ FROM cloudflare/cloudflared:2026.10.0@sha256:9b49eed8f62806d5d45ddf59ecefb571042
 
 # The official Python image is Debian trixie-slim plus Python (about 45 MB),
 # for the wish scanner (wishes/wishes.py). Its two libraries add about 20 MB.
-FROM python:3.13.17-slim-trixie@sha256:d98cc29d3266e535dd9da1099688d9cb3ca4753813571e071763d17725460962
+FROM python:3.15.2-slim-trixie@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87e4b031bc36928
 # No apt: the base already has the CA bundle, tzdata, setpriv (util-linux)
 # and bash. The entrypoint is PID 1 and handles TERM.
 RUN useradd --system --uid 10001 --home-dir /data --no-create-home --shell /usr/sbin/nologin pp
