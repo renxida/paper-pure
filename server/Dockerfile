@@ -35,7 +35,7 @@ COPY go.mod ./
 COPY ppd/ ./ppd/
 RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/ppd ./ppd
 
-FROM restic/restic:0.19.1@sha256:136600b6ff6843d61d355f7f71f460a166429f35de6fd11b568fece3c9a4d510 AS restic
+FROM restic/restic:0.20.0@sha256:93999df80d4ac6cb148e82d2ef1fe6a81996f17ff535e772723538211b31555a AS restic
 FROM cloudflare/cloudflared:2026.10.0@sha256:9b49eed8f62806d5d45ddf59ecefb5710429598ea6d3fcccd2af938f621b2b07 AS cloudflared
 
 # The official Python image is Debian trixie-slim plus Python (about 45 MB),
